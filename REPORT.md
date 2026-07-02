@@ -6,6 +6,13 @@ as two independent MCP servers over HTTP — exactly as a real remote deployment
 be, just pointed at `localhost` instead of a public hostname. See [CLAUDE.md](CLAUDE.md)
 for the original brief.
 
+**Status note**: this report documents the single-version local PoC phase and its
+"go" recommendation, preserved as-is for the historical record. The project has
+since moved into building the real multi-country, multi-version public service —
+see [CLAUDE.md](CLAUDE.md) for current status and
+[.specify/memory/constitution.md](.specify/memory/constitution.md) for the
+governing architecture principles that phase established.
+
 ## TL;DR — Go / No-Go
 
 **Go**, with caveats. Both layers work, both test scenarios produced real, accurate,
