@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bc-code-atlas-registry"
+version = "0.1.0"
+description = "Version discovery/resolution and diff/history over the upstream MSDyn365BC.Sandbox.Code.History repository"
+# Deviation from chunker/aggregator's ">=3.11": tree-sitter-al>=3.0.1 (the
+# pin this project needs to match chunker's) only ships wheels for
+# Python>=3.12, confirmed by `uv sync` resolution failure against ">=3.11"
+# here. plan.md's stated target for this feature is Python 3.13 anyway, so
+# this pins to that instead of loosening the tree-sitter-al requirement.
+requires-python = ">=3.13"
+dependencies = [
+    # Matches chunker/aggregator's existing pin (see aggregator/pyproject.toml).
+    "mcp>=1.0",
+    # Path dependency (below, [tool.uv.sources]) on the graphify-al submodule --
+    # registry reuses graphify's `_AL_CONFIG` (node type names, body field
+    # name), `_resolve_name`/`_al_strip_quotes`, and source_lookup.py's
+    # parser/header/full-text extraction helpers rather than reimplementing
+    # any of it (plan.md Project Structure; constitution "Prefer composing
+    # existing, verified primitives").
+    "graphifyy",
+    # graphify-al deliberately does NOT declare tree-sitter-al as its own
+    # dependency (confirmed in tools/graphify-al/AL_SUPPORT.md: "tree-sitter-al
+    # is a normal PyPI dependency; it is not vendored here" -- installed
+    # separately into whichever venv actually parses AL). registry is that
+    # venv here, so it declares this itself, matching chunker's existing pin
+    # (see chunker/pyproject.toml).
+    "tree-sitter>=0.24",
+    "tree-sitter-al>=3.0.1",
+]
+
+[tool.uv.sources]
+# tools/graphify-al is a git submodule (StefanMaron/graphify-al, branch
+# bc-code-atlas-fixes) checked out locally -- a path dependency, not a
+# fresh fork/copy (constitution Principle VI).
+graphifyy = { path = "../tools/graphify-al" }
+
+[tool.setuptools.packages.find]
+include = ["registry*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: real, network-dependent tests against the live upstream repo (run with `pytest`, skip with `pytest -m \"not network\"`)",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

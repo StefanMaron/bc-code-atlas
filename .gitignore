@@ -2,7 +2,13 @@
 __pycache__/
 *.pyc
 *.egg-info/
-build/
+# Nested setuptools build artifacts (e.g. chunker/build/lib/...) -- NOT the
+# top-level build/ uv project (registry/build split, see
+# specs/001-multi-version-serving/) or its own build/build/ package dir,
+# which must stay tracked despite being named "build" too.
+**/build/
+!/build/
+!/build/build/
 .venv/
 
 # Runtime logs

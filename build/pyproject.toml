@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bc-code-atlas-build"
+version = "0.1.0"
+description = "Build/serve split for bc-code-atlas: bounded build queue, incremental clone-nearest-warm-sibling builds, staging + atomic promote, LRU/TTL eviction"
+requires-python = ">=3.11"
+dependencies = [
+    # Matches chunker/aggregator's existing pin (see aggregator/pyproject.toml).
+    "mcp>=1.0",
+    # Deliberately NO cocoindex-code / ML-embedding dependency here -- this
+    # project invokes cocoindex-code's stock `ccc index` CLI as a subprocess
+    # against a staging path (research.md "incremental builds via clone-
+    # nearest-warm-sibling" decision; constitution Principle VI: cocoindex-code
+    # stays unforked and un-imported-in-process by this service).
+]
+
+[tool.setuptools.packages.find]
+include = ["build*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
