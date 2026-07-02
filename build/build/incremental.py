@@ -30,9 +30,13 @@ never touches `asyncio` itself.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import signal
 import subprocess
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,13 +219,21 @@ def _write_blob(sha: str, path: str, dest_root: Path, mirror_dir: Path) -> None:
     dest.write_bytes(content)
 
 
-def _apply_diff(base_sha: str, target_sha: str, search_dir: Path, mirror_dir: Path) -> int:
+def _apply_diff(
+    base_sha: str, target_sha: str, search_dir: Path, mirror_dir: Path
+) -> tuple[int, list[str]]:
     """Overwrite only the files that really differ between `base_sha` and
     `target_sha` (from `target_sha`'s real blobs) in an already-cloned
-    `search_dir`. Returns the number of changed paths actually applied.
+    `search_dir`. Returns `(changed_count, changed_paths)` -- `changed_paths`
+    lists every path this diff actually touched (added/modified/deleted, and
+    BOTH sides of a rename -- the old path needs its stale graph nodes
+    evicted, the new path needs re-extraction), reused as-is by
+    `_run_graphify_update` so graphify-al's own incremental rebuild doesn't
+    need to recompute the same diff a second time.
     """
     result = _run_git(["diff", "--name-status", base_sha, target_sha], mirror_dir)
     changed = 0
+    changed_paths: list[str] = []
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -233,14 +245,18 @@ def _apply_diff(base_sha: str, target_sha: str, search_dir: Path, mirror_dir: Pa
             if old_fp.exists():
                 old_fp.unlink()
             _write_blob(target_sha, new_path, search_dir, mirror_dir)
+            changed_paths.append(_old_path)
+            changed_paths.append(new_path)
         elif status.startswith("D"):
             fp = search_dir / parts[1]
             if fp.exists():
                 fp.unlink()
+            changed_paths.append(parts[1])
         else:  # A, M, T, C, ...
             _write_blob(target_sha, parts[1], search_dir, mirror_dir)
+            changed_paths.append(parts[1])
         changed += 1
-    return changed
+    return changed, changed_paths
 
 
 def _extract_tree(sha: str, dest_dir: Path, mirror_dir: Path) -> None:
@@ -268,15 +284,6 @@ def _extract_tree(sha: str, dest_dir: Path, mirror_dir: Path) -> None:
         raise IncrementalBuildError(f"tar extract of {sha} into {dest_dir} failed (exit {extract.returncode})")
 
 
-def _run_uv(args: list[str], cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    result = subprocess.run(["uv", *args], cwd=cwd, capture_output=True, text=True, env=env)
-    if result.returncode != 0:
-        raise IncrementalBuildError(
-            f"uv {' '.join(args)} (cwd={cwd}) failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return result
-
-
 def _bootstrap_project_settings(search_dir: Path) -> None:
     """Write the known-good AL-aware project settings (see
     `_PROJECT_SETTINGS_YAML`'s docstring above) directly, instead of
@@ -302,6 +309,83 @@ def _bootstrap_project_settings(search_dir: Path) -> None:
         shutil.copy2(_CHUNKER_SOURCE_FILE, search_dir / _CHUNKER_SOURCE_FILE.name)
 
 
+# Watchdog tuning for `_run_ccc_index` (see its docstring for why a
+# watchdog exists at all). The stall timeout must sit comfortably above
+# normal quiet phases (measured live: daemon start -> first index-DB write
+# took under a minute once unblocked, and steady-state writes land every
+# few seconds) and well below the observed hang onsets (~13-31 min in), so
+# a stall is recovered in minutes without ever tripping on a healthy run.
+_CCC_POLL_INTERVAL_S = 15.0
+_CCC_STALL_TIMEOUT_S = float(os.environ.get("BCATLAS_CCC_STALL_TIMEOUT_S", "300"))
+_CCC_MAX_TOTAL_S = float(os.environ.get("BCATLAS_CCC_INDEX_MAX_TOTAL_S", str(4 * 3600)))
+# Restarts that resume partial progress are expected and unbounded (within
+# the wall-clock ceiling) -- the observed hang can recur several times in
+# one build. What's NOT acceptable is restarting without ever advancing:
+# that means something is genuinely broken (bad settings, dead GPU, ...)
+# and retrying is just a hot loop.
+_CCC_MAX_ZERO_PROGRESS_RESTARTS = 3
+
+
+def _index_state_fingerprint(search_dir: Path) -> tuple[int, int]:
+    """Progress signal for the `ccc index` watchdog: `(total_bytes,
+    newest_mtime_ns)` across everything under `.cocoindex_code/` (the
+    target SQLite DB + its WAL + the LMDB tracking state), which real
+    indexing writes to every few seconds (measured live). `lock.mdb` is
+    excluded because LMDB touches it merely on environment *open*, so a
+    daemon restart would otherwise register as fake progress.
+    """
+    total = 0
+    newest = 0
+    for p in (search_dir / ".cocoindex_code").rglob("*"):
+        if p.name == "lock.mdb":
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        total += st.st_size
+        newest = max(newest, st.st_mtime_ns)
+    return (total, newest)
+
+
+def _kill_daemon_by_pidfile(runtime_dir: Path) -> None:
+    """SIGTERM -> SIGKILL the per-build `ccc run-daemon` via its own
+    `daemon.pid` file. Deliberately NOT `ccc daemon stop`: its graceful
+    path does a blocking socket `recv_bytes()` against the daemon
+    (confirmed by source inspection of `cocoindex_code/client.py`'s
+    `stop_daemon`), which against the exact deadlocked-daemon state this
+    is here to clean up could itself hang. Killing by PID cannot.
+    SIGKILL'ing the process-group (the daemon is its own session leader,
+    per `client.start_daemon`'s `start_new_session=True`) also reaps its
+    spawned GPU-worker child, which was observed live to survive -- and
+    keep ~7GB of GPU memory resident -- when only the daemon PID was
+    killed.
+    """
+    pid_file = runtime_dir / "daemon.pid"
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return
+    for sig, grace_s in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            # Not a process-group leader after all -- fall back to the PID.
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return
+        deadline = time.monotonic() + grace_s
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.2)
+
+
 def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
     """Real `ccc index` against `search_dir`, bootstrapping AL-aware
     project settings first if this is a cold build with no cloned base
@@ -310,35 +394,233 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
     `Path.cwd()` (confirmed by direct source inspection of
     `cocoindex_code/cli.py`'s `require_project_root`), so `cwd=search_dir`
     is what actually scopes it, not an argument.
+
+    Two deliberate defenses around what is otherwise a plain subprocess
+    call, both responses to real, live-reproduced failures -- never
+    theorized (constitution Principle V), and neither fixable inside the
+    vendored `cocoindex-code` package itself (Principle VI):
+
+    1. ISOLATED per-build daemon. `COCOINDEX_CODE_RUNTIME_DIR`
+       (deliberately NOT `COCOINDEX_CODE_DIR` -- that one governs
+       `global_settings.yml`, the embedding-model config, which must stay
+       shared/discoverable) points the daemon's socket/pid/log at a
+       directory scoped to this build, so `ccc`'s client auto-start logic
+       spins up a private daemon process whose `GPURunner`/`BatchQueue`
+       singletons are never shared with the always-on search server's
+       daemon on :8801. Beyond honoring the constitution's build/serve
+       resource separation, this matters concretely: two daemons pointed
+       at the SAME project directory block each other on the project's
+       LMDB/SQLite state (observed live -- a freshly started daemon sat
+       0%-CPU idle for 5+ minutes until a defunct older daemon holding
+       those locks was killed, then proceeded within seconds).
+
+    2. STALL WATCHDOG with kill-and-resume retry. `ccc index` has a real,
+       repeatedly reproduced (4+ independent occurrences in one session)
+       upstream stall: after minutes of healthy progress (GPU busy, index
+       DB growing steadily) the daemon goes permanently idle -- every
+       thread sleeping, zero CPU accrual across samples, GPU at background
+       noise, client blocked forever on a still-ESTABLISHED unix socket
+       with 0 bytes queued. Not a crash, not GPU compute in flight; it
+       never recovers (30+ min observed). Onset varies (~13-31 min in, DB
+       at anywhere 72-463MB), it reproduces with an isolated daemon AND
+       with `COCOINDEX_RUN_GPU_IN_SUBPROCESS=1`, so it is not the shared-
+       daemon contention above nor simple GPU-runner lock contention. Root
+       cause lives somewhere in cocoindex's Rust/async internals and is
+       out of reach (Principle VI). The workaround leans on a VERIFIED
+       property (tested live, this session, by killing a run mid-flight
+       and re-running: the index DB resumed growing from where it stopped
+       within ~40s, no reset, no re-embedding of completed files):
+       `ccc index` is resumable via its own LMDB tracking state in
+       `.cocoindex_code/cocoindex.db`. So: poll the on-disk index state
+       for progress, and on a genuine stall kill the client + daemon and
+       simply run `ccc index` again -- each retry keeps all completed
+       work. Stale `daemon.sock`/`daemon.pid` are removed after a kill
+       because the client's `is_daemon_running` merely checks that the
+       socket *file* exists (source-inspected), so leftovers would make
+       the retry connect to nothing and fail instead of auto-starting a
+       fresh daemon.
+
+    The per-build daemon is torn down when indexing finishes (success or
+    failure) so a build doesn't leave a ~GB-of-GPU-memory process resident
+    forever; teardown is best-effort and never masks the real outcome.
     """
     settings_file = search_dir / ".cocoindex_code" / "settings.yml"
     if init_if_needed and not settings_file.is_file():
         _bootstrap_project_settings(search_dir)
-    _run_uv(["run", "--project", str(_COCOINDEX_PROJECT), "ccc", "index"], cwd=search_dir)
+
+    # The runtime dir holds a real AF_UNIX socket (`daemon.sock`) -- Linux
+    # caps `sockaddr_un.sun_path` at 108 bytes, and `search_dir` (nested
+    # under `data/staging/<country>-<40-char-sha>-<timestamp>-<hash>/search`)
+    # is already close to that on its own, so the socket must live under a
+    # short, unique path outside the repo tree rather than inside
+    # `search_dir` itself (confirmed live: nesting it there raised a real
+    # `OSError: AF_UNIX path too long` from the daemon on startup -- caught
+    # by actually running the fix, not assumed).
+    runtime_dir = Path(tempfile.gettempdir()) / "bcatlas-ccc-build" / hashlib.sha256(
+        str(search_dir).encode()
+    ).hexdigest()[:16]
+    env = dict(os.environ)
+    env["COCOINDEX_CODE_RUNTIME_DIR"] = str(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    # Client output goes to a file, not a pipe: the client streams rich
+    # spinner updates continuously, and an undrained pipe would fill and
+    # block it -- indistinguishable from the very stall being watched for.
+    client_log = runtime_dir / "index-client.log"
+
+    started = time.monotonic()
+    zero_progress_restarts = 0
+    attempt = 0
+    try:
+        while True:
+            attempt += 1
+            attempt_start_fp = _index_state_fingerprint(search_dir)
+            with open(client_log, "ab") as log_fd:
+                proc = subprocess.Popen(
+                    ["uv", "run", "--project", str(_COCOINDEX_PROJECT), "ccc", "index"],
+                    cwd=search_dir,
+                    env=env,
+                    stdout=log_fd,
+                    stderr=log_fd,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            last_fp = attempt_start_fp
+            last_progress = time.monotonic()
+            stalled = False
+            while True:
+                try:
+                    proc.wait(timeout=_CCC_POLL_INTERVAL_S)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                now = time.monotonic()
+                fp = _index_state_fingerprint(search_dir)
+                if fp != last_fp:
+                    last_fp = fp
+                    last_progress = now
+                elif now - last_progress >= _CCC_STALL_TIMEOUT_S:
+                    stalled = True
+                    break
+                if now - started >= _CCC_MAX_TOTAL_S:
+                    raise IncrementalBuildError(
+                        f"ccc index exceeded the {_CCC_MAX_TOTAL_S:.0f}s total wall-clock "
+                        f"ceiling (attempt {attempt}); see {client_log}"
+                    )
+
+            if not stalled:
+                if proc.returncode == 0:
+                    return
+                tail = ""
+                try:
+                    tail = client_log.read_text(errors="replace")[-2000:]
+                except OSError:
+                    pass
+                raise IncrementalBuildError(
+                    f"ccc index failed (exit {proc.returncode}): {tail.strip()}"
+                )
+
+            # Stalled: kill client + daemon and go around again -- resume is
+            # cheap (verified, see docstring), so the only unrecoverable
+            # cases are "never advances at all" and the wall-clock ceiling.
+            print(
+                f"ccc index on {search_dir} stalled (no on-disk progress for "
+                f"{_CCC_STALL_TIMEOUT_S:.0f}s, attempt {attempt}); killing and resuming",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.wait()
+            _kill_daemon_by_pidfile(runtime_dir)
+            (runtime_dir / "daemon.sock").unlink(missing_ok=True)
+            (runtime_dir / "daemon.pid").unlink(missing_ok=True)
+
+            if _index_state_fingerprint(search_dir) == attempt_start_fp:
+                zero_progress_restarts += 1
+                if zero_progress_restarts >= _CCC_MAX_ZERO_PROGRESS_RESTARTS:
+                    raise IncrementalBuildError(
+                        f"ccc index stalled {zero_progress_restarts} consecutive times "
+                        f"without any progress (attempt {attempt}); see {client_log} "
+                        f"and {runtime_dir / 'daemon.log'}"
+                    )
+            else:
+                zero_progress_restarts = 0
+    finally:
+        _kill_daemon_by_pidfile(runtime_dir)
+        shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
-def _run_graphify_update(search_dir: Path, graph_dir: Path) -> None:
+def _run_graphify_update(
+    search_dir: Path, graph_dir: Path, changed_paths: list[str] | None = None
+) -> None:
     """Real `python -m graphify update <search_dir>` with `GRAPHIFY_OUT`
     pointed at `graph_dir` (an absolute path -- `graphify` joins it with
     `watch_path` via `Path.__truediv__`, which for an absolute right-hand
     side simply returns the absolute path unchanged, so this lands
     `graph.json` in the layout-defined staging graph dir instead of nested
     under the search dir, matching `layout.py`'s split search/graph
-    convention). No incremental graph mode this cut (plan.md) -- always a
-    full re-extraction, which has no ML cost.
+    convention).
+
+    `changed_paths` (from `_apply_diff`'s real `git diff --name-status`
+    output -- `None` for a cold build with no base to diff against) is
+    forwarded via `graphify update`'s `--changed-paths-file` flag, an
+    addition this project made to the `graphify-al` fork specifically for
+    this: `graphify-al` is OUR maintained fork (constitution Principle VI
+    only protects the vendored, unforked `cocoindex-code`), and it already
+    had the underlying incremental-rebuild machinery
+    (`graphify.watch._rebuild_code`'s `changed_paths` parameter, previously
+    only reachable from its own git-hook integration) -- it just wasn't
+    exposed on the `update` CLI subcommand our build pipeline shells out to.
+    Measured live (this session): a real minor-version hop where only 1231
+    of 19276 files actually changed took graphify ~561s with a full
+    re-extraction, ~433s once wired to extract only the real diff (a real
+    but MODEST win, not proportional to the 1231/19276 file ratio) --
+    `_rebuild_code` skips AST extraction for unchanged files and preserves
+    their nodes/edges instead of re-deriving them, but still re-runs full-
+    graph community clustering, labeling, report generation, and JSON
+    export over the ENTIRE merged graph (265K+ nodes) every time, none of
+    which is incremental. Those full-graph steps -- not AST extraction --
+    dominate this pipeline's wall-clock, which is why the speedup is real
+    but far smaller than the changed-file ratio would suggest. IMPORTANT
+    caller obligation established by the same measurement: `changed_paths`
+    only helps if the STAGING `graph_dir` already contains the base's prior
+    `graph.json` before this call -- `_rebuild_code` reads `existing
+    graph.json` from wherever `GRAPHIFY_OUT` (`graph_dir`) points, and an
+    empty staging graph dir (this build's own, not the base's) silently
+    produces a corpus-collapsed graph (measured live: 45,610 nodes instead
+    of the expected ~265K) with NO error -- see `build_version`'s
+    `base_warm_graph_dir` clone, which must run before this. Omitting
+    `changed_paths` (a cold build, or any caller that doesn't pass it) is
+    unaffected -- `graphify update`'s own default remains the original full
+    re-extraction.
     """
     graph_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["GRAPHIFY_OUT"] = str(graph_dir)
-    result = subprocess.run(
-        ["uv", "run", "--project", str(_GRAPHIFY_PROJECT), "python", "-m", "graphify", "update", str(search_dir)],
-        cwd=_GRAPHIFY_PROJECT,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if result.returncode != 0:
-        raise IncrementalBuildError(f"graphify update failed (exit {result.returncode}): {result.stderr.strip()}")
+    cmd = [
+        "uv", "run", "--project", str(_GRAPHIFY_PROJECT),
+        "python", "-m", "graphify", "update", str(search_dir),
+    ]
+
+    changed_paths_file: Path | None = None
+    try:
+        if changed_paths is not None:
+            fd, tmp_name = tempfile.mkstemp(prefix="bcatlas-graphify-changed-", suffix=".txt")
+            changed_paths_file = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(changed_paths))
+            cmd += ["--changed-paths-file", str(changed_paths_file)]
+
+        result = subprocess.run(cmd, cwd=_GRAPHIFY_PROJECT, capture_output=True, text=True, env=env)
+        if result.returncode != 0:
+            raise IncrementalBuildError(
+                f"graphify update failed (exit {result.returncode}): {result.stderr.strip()}"
+            )
+    finally:
+        if changed_paths_file is not None:
+            changed_paths_file.unlink(missing_ok=True)
 
 
 def build_version(
@@ -362,15 +644,29 @@ def build_version(
 
     base = select_base(country, commit_sha, version_string, data_dir, mirror_dir)
     changed_file_count: int | None = None
+    changed_paths: list[str] | None = None
 
     if base is not None:
         shutil.copytree(base.warm_search_dir, search_dir)
-        changed_file_count = _apply_diff(base.commit_sha, commit_sha, search_dir, mirror_dir)
+        # graphify-al's incremental rebuild (`--changed-paths-file`, see
+        # `_run_graphify_update`) only preserves nodes/edges for unchanged
+        # files by reading whatever `graph.json` already sits in the graph
+        # dir it's pointed at (`GRAPHIFY_OUT`) -- that's THIS build's fresh
+        # staging graph dir, not the base's warm one, unless we seed it.
+        # Skipping this clone was tried first and measured live: it silently
+        # produced a graph with only the ~1231 changed files' worth of nodes
+        # (45,610) instead of preserving the base's other ~18,000 unchanged
+        # files (263,921 total) -- `_rebuild_code` has no way to know they
+        # ever existed if `existing_graph.json` isn't there to read.
+        base_warm_graph_dir = layout.warm_graph_dir(base.country, base.commit_sha, data_dir)
+        if base_warm_graph_dir.is_dir():
+            shutil.copytree(base_warm_graph_dir, graph_dir)
+        changed_file_count, changed_paths = _apply_diff(base.commit_sha, commit_sha, search_dir, mirror_dir)
     else:
         _extract_tree(commit_sha, search_dir, mirror_dir)
 
     _run_ccc_index(search_dir, init_if_needed=base is None)
-    _run_graphify_update(search_dir, graph_dir)
+    _run_graphify_update(search_dir, graph_dir, changed_paths=changed_paths)
 
     return BuildOutcome(
         build_id=build_id,
