@@ -29,50 +29,65 @@ proceed.
 
 ## Where things stand today
 
-**Built and running** (local, single-version — `w1-28` only, still the
-current runtime reality, the multi-country/multi-version serving layer
-described below is not built yet):
+**Built and running** — the multi-country/multi-version serving layer
+(spec `specs/001-multi-version-serving/`) is implemented and verified live,
+end to end, through the aggregator:
 - `w1-28` AL source + two docs corpora (`dynamics365smb-docs`
   business-central docs, `dynamics365smb-devitpro-pb` AL developer/compiler
   reference) indexed via a custom `tree-sitter-al` chunker into
-  `cocoindex-code`, served as MCP over HTTP (`chunker/`).
+  `cocoindex-code`, served as MCP over HTTP (`chunker/`) — still the
+  always-warm default corpus every search/graph tool falls back to.
 - The structural graph extracted via the `graphify-al` fork, served as MCP
   over HTTP (`tools/graphify-al`), including on-demand exact-source lookup
-  tools (`get_signature`, `get_procedure_body`, `get_object_source`) that
-  re-parse real source on request rather than caching text in the graph.
+  tools (`bcatlas_get_signature`, `bcatlas_get_procedure_body`,
+  `bcatlas_get_object_source`) that re-parse real source on request rather
+  than caching text in the graph.
+- **Registry** (`registry/`, `:8803`) — `bcatlas_list_countries`,
+  `bcatlas_list_versions`, `bcatlas_resolve_version` (real git ls-remote/log
+  against the upstream repo, no new database); `bcatlas_diff` (file- or
+  symbol-scoped, rejects unscoped requests) and `bcatlas_symbol_history`
+  (multi-step change chain, filters out commits that touched a symbol's
+  file without changing the symbol's own text).
+- **Build** (`build/`, `:8804`) — `bcatlas_request_version` /
+  `bcatlas_version_status`: staging + atomic promote, bounded GPU-aware
+  build queue with request coalescing, clone-and-patch incremental builds
+  against the nearest already-warm sibling (reuses cocoindex-code's stock
+  incremental `ccc index`, no fork), LRU/TTL eviction of idle warm data.
+- `chunker/mcp_http_server.py` and `tools/graphify-al/graphify/serve.py`
+  are now multi-tenant: every search/graph tool accepts optional
+  `country`/`version` (the exact `commit_sha`, not `version_string`) to
+  route to a specific built pair instead of the default corpus.
 - A thin aggregator (`aggregator/`) presenting one `/mcp` endpoint to
-  clients, forwarding to both backends.
+  clients, forwarding to all four backends and passing `country`/`version`
+  through unchanged.
 - Real tester validation against both original test scenarios plus organic
   use; see `REPORT.md` for the full account and `README.md` for the
   current architecture diagram and local Quick Start.
 
-**Being designed now, not yet built** — the real-implementation phase:
-serving an unbounded set of (country, version) pairs concurrently, bounded
-only by hardware (constitution Principle IV). This decomposes into
-independent pieces, none started yet:
-1. A version resolver: `(country, version-spec) → exact commit`, tolerant
-   of exact builds or loose specs ("latest 28.1").
-2. On-demand historical commit/blob fetch (today's submodules only have
-   each branch's tip locally).
-3. A version/country discovery tool so a calling agent — which has no way
-   to know what's available — can list real options before requesting one.
-4. A diff tool scoped to a file or, better, a resolved symbol (reusing the
-   `get_procedure_body`-style tree-sitter extraction against two arbitrary
-   historical blobs instead of the working tree) — never an unscoped
-   whole-repo diff, that's already been measured as unusably large.
-5. A multi-step "how did this procedure change across these versions"
-   chain, built from (4) plus `git log` scoped to the containing file.
-6. The build/serve split itself (constitution Principle II): a bounded,
-   GPU-aware build queue writing to staging + atomic promote, and a
-   multi-tenant serving layer with one shared embedding-capable process
-   instead of one process per warm version.
-7. Clone-then-patch incremental builds for version/country hops, using
-   cocoindex-code's own stock incremental `index()` against a cloned
-   project directory with only the git-diffed files swapped in — no fork
-   of cocoindex needed for this.
+**Verified live this build** (not simulated — a real MCP client session
+against the running aggregator): version discovery/resolution against the
+real upstream repo (including two real bugs found and fixed along the way
+— transitive-ancestor major/minor leakage, and `-vNext` preview builds
+outranking stable ones under naive "highest build wins"); an unscoped diff
+rejected explicitly; a real symbol diff and a real multi-step symbol
+history that correctly collapsed 2 raw touching commits down to 1 real
+change; a genuinely new (country, version) build requested, queued, and
+built for real through the actual build queue (not an ad hoc script),
+confirmed via `bcatlas_version_status` and the promoted artifact on disk.
 
-Each of these should go through its own `/speckit-specify` cycle rather
-than being designed further in this file.
+**Known open items, not yet fully closed:**
+- No trustworthy incremental-vs-cold wall-clock number has been captured
+  yet (constitution Principle V — don't assert one without measuring it
+  for real; two manual attempts were contaminated by tooling/process
+  collisions and discarded rather than reported).
+- Whether the shared system-wide `ccc` daemon's chunker resolution
+  (`importlib.import_module`, no per-project `sys.path` insertion in
+  cocoindex-code) reliably finds `al_chunker` for every brand-new staging
+  project is defensively mitigated (the chunker is copied into each
+  staging dir) but not proven across many builds yet.
+- Reindex-webhook wiring into the sandbox-history repo's own GitHub
+  Actions is still not built — tracked as future work, the build/serve
+  split it would wire into now exists.
 
 ## Key facts already established — don't re-derive
 
@@ -109,8 +124,9 @@ here since they're not principles, just measurements:
   (event-driven/interface dispatch isn't followed statically) — documented
   upstream limitation, not a bug to chase (constitution Principle VI).
 - Reindex-webhook wiring into the sandbox-history repo's own GitHub Actions
-  is not yet built — tracked as future work once the build/serve split
-  above exists to wire it into, not excluded forever.
+  is not yet built — the build/serve split it would wire into now exists
+  (see "Known open items" above), still tracked as future work, not
+  excluded forever.
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
