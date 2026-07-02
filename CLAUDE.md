@@ -111,3 +111,9 @@ here since they're not principles, just measurements:
 - Reindex-webhook wiring into the sandbox-history repo's own GitHub Actions
   is not yet built — tracked as future work once the build/serve split
   above exists to wire it into, not excluded forever.
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+at specs/001-multi-version-serving/plan.md
+<!-- SPECKIT END -->
