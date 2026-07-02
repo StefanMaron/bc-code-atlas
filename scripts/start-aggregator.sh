@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Unified MCP endpoint (default :8800) -- point MCP clients and the Cloudflare
-# Tunnel at this. Requires the search and graph backends already running
-# (start-search-server.sh, start-graph-server.sh).
+# Tunnel at this. Requires all four backends already running
+# (start-search-server.sh, start-graph-server.sh, start-registry-server.sh,
+# start-build-server.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -10,6 +11,8 @@ args=(
     --port "${AGGREGATOR_PORT:-8800}"
     --search-url "http://127.0.0.1:${SEARCH_PORT:-8801}/mcp"
     --graph-url "http://127.0.0.1:${GRAPH_PORT:-8802}/mcp"
+    --registry-url "http://127.0.0.1:${REGISTRY_PORT:-8803}/mcp"
+    --build-url "http://127.0.0.1:${BUILD_PORT:-8804}/mcp"
 )
 # Set this to the hostname a Cloudflare Tunnel (or any reverse proxy) fronts
 # this server with -- required or every tunneled request gets rejected with

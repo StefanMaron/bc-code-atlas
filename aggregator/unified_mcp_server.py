@@ -8,15 +8,36 @@ the two backend servers actually implements it:
     search over the AL source + docs corpus.
   - the graph server (tools/graphify-al's `graphify.serve`, default :8802) --
     the structural call/subscribe/extend graph.
+  - the registry server (registry/registry/mcp_server.py, default :8803) --
+    country/version discovery and resolution.
+  - the build server (build/build/mcp_server.py, default :8804) -- on-demand
+    build/serve of a (country, version) pair not yet warm.
 
-Both backends keep running exactly as documented in the top-level README --
-this is a thin proxy, not a reimplementation. No business logic lives here;
-if a backend's behavior changes, this file doesn't need to.
+All four backends keep running exactly as documented in the top-level README
+-- this is a thin proxy, not a reimplementation. No business logic lives
+here; if a backend's behavior changes, this file doesn't need to.
+
+The search/graph backends are multi-tenant (specs/001-multi-version-serving):
+every one of their tools accepts optional `country`/`version` params to
+route to a specific already-built (country, version) pair instead of the
+server's own default corpus. This file forwards those two params through
+unchanged when supplied -- it does not resolve or validate them itself; the
+backends already return a clear error for an unbuilt or partially-specified
+pair (see chunker/mcp_http_server.py's `_invalid_warm_project_reason` and
+graphify-al's `_resolve_ctx`), so a second check here would just duplicate
+that logic. IMPORTANT: `version` here means the exact `commit_sha` returned
+by `bcatlas_resolve_version`/`bcatlas_request_version` -- NOT the
+human-readable `version_string` (e.g. `w1-28.2.50931.52151`) also returned
+by those tools. The warm-directory layout (build/build/layout.py) is keyed
+by commit_sha; passing version_string instead will look like a "not built
+yet" error even for an already-warm pair.
 
 Usage:
     uv run python unified_mcp_server.py \
         --search-url http://127.0.0.1:8801/mcp \
         --graph-url http://127.0.0.1:8802/mcp \
+        --registry-url http://127.0.0.1:8803/mcp \
+        --build-url http://127.0.0.1:8804/mcp \
         --port 8800
 """
 
@@ -43,6 +64,17 @@ _AGGREGATOR_INSTRUCTIONS = (
     " BC docs, and the public AL developer/compiler reference (diagnostics,"
     " properties, methods)."
     "\n\n"
+    "Everything below defaults to the w1-28 base application unless you"
+    " resolve and pass a different (country, version) -- see step 0."
+    "\n\n"
+    "0. `bcatlas_list_countries`, `bcatlas_list_versions`, `bcatlas_resolve_version`"
+    " -- discover what countries/versions exist and resolve a spec (exact or"
+    " loose, e.g. 'latest 28.1') to one unambiguous build. Then"
+    " `bcatlas_request_version` to make a not-yet-built pair available"
+    " (poll `bcatlas_version_status`), and pass the returned `commit_sha`"
+    " (NOT `version_string`) as `version` to any search/graph tool below to"
+    " query that exact pair instead of the default w1-28 corpus."
+    "\n\n"
     "Three complementary layers, meant to be used in this order:"
     "\n"
     "1. `bcatlas_search` -- semantic search by meaning. Use this first to find a"
@@ -59,11 +91,17 @@ _AGGREGATOR_INSTRUCTIONS = (
     " connect."
     "\n"
     "3. `bcatlas_get_signature`, `bcatlas_get_procedure_body`, `bcatlas_get_object_source` -- exact"
-    " source text re-read from the real w1-28 files for a node the previous"
+    " source text re-read from the real source files for a node the previous"
     " two steps found. Use `bcatlas_get_signature` as a cheap check that you have"
     " the right node, then `bcatlas_get_procedure_body`/`bcatlas_get_object_source` to"
     " verify real behavior (exact params, var types, line-by-line logic)"
     " instead of guessing it from the name alone."
+    "\n\n"
+    "For comparing two versions of the same country: `bcatlas_diff` (scoped to"
+    " a file path or a resolved symbol -- never unscoped) and"
+    " `bcatlas_symbol_history` (every point within a range where one"
+    " specific symbol's own text actually changed, not just its containing"
+    " file)."
     "\n\n"
     "A good pattern: `bcatlas_search` for a concept in natural language, then"
     " `bcatlas_query_graph`/`bcatlas_get_neighbors` on what it finds to see its exact"
@@ -103,7 +141,7 @@ async def _forward(url: str, tool: str, arguments: dict[str, Any]) -> Any:
     return text
 
 
-def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
+def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_url: str) -> FastMCP:
     mcp = FastMCP("bc-code-atlas", instructions=_AGGREGATOR_INSTRUCTIONS)
 
     @mcp.tool(
@@ -146,6 +184,23 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
             default=False,
             description="Include AL test codeunits (Tests-*, *Test Library*, etc.) in results.",
         ),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') to query a specific, already-built"
+                " (country, version) pair instead of the default w1-28 corpus."
+                " Must be paired with `version`. Resolve both first via"
+                " bcatlas_resolve_version/bcatlas_request_version."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired with"
+                " `country`."
+            ),
+        ),
     ) -> Any:
         return await _forward(
             search_url,
@@ -158,6 +213,8 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
                 "languages": languages,
                 "paths": paths,
                 "include_tests": include_tests,
+                "country": country,
+                "version": version,
             },
         )
 
@@ -190,6 +247,22 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         context_filter: list[str] | None = Field(
             default=None, description="Optional explicit edge-context filter, e.g. ['call', 'field']"
         ),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
     ) -> Any:
         return await _forward(
             graph_url,
@@ -200,6 +273,8 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
                 "depth": depth,
                 "token_budget": token_budget,
                 "context_filter": context_filter,
+                "country": country,
+                "version": version,
             },
         )
 
@@ -207,8 +282,26 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         name="bcatlas_get_node",
         description="Get full details for a specific BC object/procedure node by label or ID.",
     )
-    async def get_node(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "bcatlas_get_node", {"label": label})
+    async def get_node(
+        label: str = Field(description="Node label or ID to look up"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(graph_url, "bcatlas_get_node", {"label": label, "country": country, "version": version})
 
     @mcp.tool(
         name="bcatlas_get_neighbors",
@@ -221,8 +314,28 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
     async def get_neighbors(
         label: str = Field(description="Node label or ID to look up"),
         relation_filter: str | None = Field(default=None, description="Optional: filter by relation type"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
     ) -> Any:
-        return await _forward(graph_url, "bcatlas_get_neighbors", {"label": label, "relation_filter": relation_filter})
+        return await _forward(
+            graph_url,
+            "bcatlas_get_neighbors",
+            {"label": label, "relation_filter": relation_filter, "country": country, "version": version},
+        )
 
     @mcp.tool(
         name="bcatlas_get_signature",
@@ -235,8 +348,28 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
             " bcatlas_get_object_source."
         ),
     )
-    async def get_signature(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "bcatlas_get_signature", {"label": label})
+    async def get_signature(
+        label: str = Field(description="Node label or ID to look up"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(
+            graph_url, "bcatlas_get_signature", {"label": label, "country": country, "version": version}
+        )
 
     @mcp.tool(
         name="bcatlas_get_procedure_body",
@@ -250,8 +383,28 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
             " use bcatlas_get_object_source for object-level nodes."
         ),
     )
-    async def get_procedure_body(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "bcatlas_get_procedure_body", {"label": label})
+    async def get_procedure_body(
+        label: str = Field(description="Node label or ID to look up"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(
+            graph_url, "bcatlas_get_procedure_body", {"label": label, "country": country, "version": version}
+        )
 
     @mcp.tool(
         name="bcatlas_get_object_source",
@@ -264,26 +417,100 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
             " only need one procedure."
         ),
     )
-    async def get_object_source(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "bcatlas_get_object_source", {"label": label})
+    async def get_object_source(
+        label: str = Field(description="Node label or ID to look up"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(
+            graph_url, "bcatlas_get_object_source", {"label": label, "country": country, "version": version}
+        )
 
     @mcp.tool(name="bcatlas_get_community", description="Get all nodes in a graph community by community ID.")
-    async def get_community(community_id: int = Field(description="Community ID (0-indexed by size)")) -> Any:
-        return await _forward(graph_url, "bcatlas_get_community", {"community_id": community_id})
+    async def get_community(
+        community_id: int = Field(description="Community ID (0-indexed by size)"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(
+            graph_url, "bcatlas_get_community", {"community_id": community_id, "country": country, "version": version}
+        )
 
     @mcp.tool(
         name="bcatlas_god_nodes",
         description="Return the most connected nodes -- the core abstractions of the base application.",
     )
-    async def god_nodes(top_n: int = Field(default=10)) -> Any:
-        return await _forward(graph_url, "bcatlas_god_nodes", {"top_n": top_n})
+    async def god_nodes(
+        top_n: int = Field(default=10),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(graph_url, "bcatlas_god_nodes", {"top_n": top_n, "country": country, "version": version})
 
     @mcp.tool(
         name="bcatlas_graph_stats",
         description="Summary statistics for the structural graph: node count, edge count, communities, confidence breakdown.",
     )
-    async def graph_stats() -> Any:
-        return await _forward(graph_url, "bcatlas_graph_stats", {})
+    async def graph_stats(country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(graph_url, "bcatlas_graph_stats", {"country": country, "version": version})
 
     @mcp.tool(
         name="bcatlas_shortest_path",
@@ -297,8 +524,115 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         source: str = Field(description="Source concept label or keyword"),
         target: str = Field(description="Target concept label or keyword"),
         max_hops: int = Field(default=8, description="Maximum hops to consider"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
     ) -> Any:
-        return await _forward(graph_url, "bcatlas_shortest_path", {"source": source, "target": target, "max_hops": max_hops})
+        return await _forward(
+            graph_url,
+            "bcatlas_shortest_path",
+            {"source": source, "target": target, "max_hops": max_hops, "country": country, "version": version},
+        )
+
+    @mcp.tool(
+        name="bcatlas_list_countries",
+        description=(
+            "List every Business Central country localization available to"
+            " query -- a finite, human-usable list, never a raw dump of"
+            " hundreds of branch names. Call this first when you don't"
+            " already know which country code (e.g. 'w1', 'us', 'de') to use."
+        ),
+    )
+    async def list_countries() -> Any:
+        return await _forward(registry_url, "bcatlas_list_countries", {})
+
+    @mcp.tool(
+        name="bcatlas_list_versions",
+        description=(
+            "List the major versions available for one country, summarized"
+            " as one entry per major.minor with that minor's latest real"
+            " build -- never one entry per raw build commit. Returns a"
+            " structured error if the country doesn't exist."
+        ),
+    )
+    async def list_versions(
+        country: str = Field(description="Country code, e.g. 'w1', 'us', 'de' (from bcatlas_list_countries)."),
+    ) -> Any:
+        return await _forward(registry_url, "bcatlas_list_versions", {"country": country})
+
+    @mcp.tool(
+        name="bcatlas_resolve_version",
+        description=(
+            "Resolve a version spec to exactly one unambiguous real build --"
+            " accepts an exact identifier (version string or commit sha) or"
+            " a loose 'major.minor' spec (e.g. '28.1' = newest build of"
+            " major 28, minor 1). NEVER guesses: an unresolvable or"
+            " ambiguous spec is rejected explicitly with resolved: false,"
+            " never silently mapped to a possibly-wrong version. Call this"
+            " before any tool that needs an exact (country, version) pair --"
+            " the returned `commit_sha` is what every other tool's `version`"
+            " parameter expects, not `version_string`."
+        ),
+    )
+    async def resolve_version(
+        country: str = Field(description="Country code, e.g. 'w1', 'us', 'de'."),
+        spec: str = Field(
+            description="Exact version string, exact commit sha, or loose 'major.minor' spec (e.g. '28.1')."
+        ),
+    ) -> Any:
+        return await _forward(registry_url, "bcatlas_resolve_version", {"country": country, "spec": spec})
+
+    @mcp.tool(
+        name="bcatlas_request_version",
+        description=(
+            "Request that a (country, version) pair's search + graph data"
+            " become available, building it from real upstream source if"
+            " not already warm. Returns immediately -- status=ready means"
+            " usable now with the `commit_sha` returned here as `version`"
+            " on any search/graph tool; status=queued/in_progress means a"
+            " build was started (or an identical in-flight request was"
+            " reused) -- poll bcatlas_version_status for completion. Never"
+            " blocks until the build finishes; building a brand new"
+            " (country, version) pair can take real time."
+        ),
+    )
+    async def request_version(
+        country: str = Field(description="Country/localization code, e.g. 'w1', 'us', 'de'."),
+        spec: str = Field(
+            description="Exact version string, exact commit sha, or loose 'major.minor' spec (e.g. '28.1')."
+        ),
+    ) -> Any:
+        return await _forward(build_url, "bcatlas_request_version", {"country": country, "spec": spec})
+
+    @mcp.tool(
+        name="bcatlas_version_status",
+        description=(
+            "Poll build status for a (country, commit_sha) pair previously"
+            " requested via bcatlas_request_version. state is 'unknown' for"
+            " a commit never requested, 'queued'/'in_progress' while"
+            " building, 'ready' once search/graph tools can be used against"
+            " it, or 'failed' (request it again to retry -- a failed build"
+            " is never silently resumed)."
+        ),
+    )
+    async def version_status(
+        country: str = Field(description="Country/localization code, e.g. 'w1'."),
+        commit_sha: str = Field(description="Exact commit sha returned by bcatlas_request_version."),
+    ) -> Any:
+        return await _forward(build_url, "bcatlas_version_status", {"country": country, "commit_sha": commit_sha})
 
     return mcp
 
@@ -311,6 +645,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8800)
     parser.add_argument("--search-url", default="http://127.0.0.1:8801/mcp")
     parser.add_argument("--graph-url", default="http://127.0.0.1:8802/mcp")
+    parser.add_argument("--registry-url", default="http://127.0.0.1:8803/mcp")
+    parser.add_argument("--build-url", default="http://127.0.0.1:8804/mcp")
     parser.add_argument(
         "--public-hostname",
         default=os.environ.get("AGGREGATOR_PUBLIC_HOSTNAME"),
@@ -326,7 +662,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    mcp_server = create_aggregator(args.search_url, args.graph_url)
+    mcp_server = create_aggregator(args.search_url, args.graph_url, args.registry_url, args.build_url)
     mcp_server.settings.host = args.host
     mcp_server.settings.port = args.port
     if args.public_hostname:
@@ -340,6 +676,8 @@ def main() -> None:
     print(f"bc-code-atlas unified MCP server (streamable-http) on http://{args.host}:{args.port}/mcp")
     print(f"  search  -> {args.search_url}")
     print(f"  graph   -> {args.graph_url}")
+    print(f"  registry -> {args.registry_url}")
+    print(f"  build   -> {args.build_url}")
     if args.public_hostname:
         print(f"  public hostname allow-listed -> {args.public_hostname}")
     asyncio.run(mcp_server.run_streamable_http_async())
