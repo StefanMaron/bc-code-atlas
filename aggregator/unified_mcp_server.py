@@ -634,6 +634,101 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
     ) -> Any:
         return await _forward(build_url, "bcatlas_version_status", {"country": country, "commit_sha": commit_sha})
 
+    @mcp.tool(
+        name="bcatlas_diff",
+        description=(
+            "Diff a single file or a single object/procedure between two"
+            " resolved versions of the SAME country -- never a"
+            " whole-repository diff. Scope with EXACTLY ONE of `path`"
+            " (file scope) or `object_type`+`object_name` (symbol scope,"
+            " optionally narrowed further with `procedure_name`). A"
+            " request with neither, or both, is rejected explicitly rather"
+            " than silently producing a large or ambiguous result. Symbol"
+            " scope independently locates and extracts the named"
+            " object/procedure in EACH version (never a raw line diff --"
+            " line numbers shift between versions), so `diff_text` only"
+            " ever reflects that symbol's own change. `from_found`/"
+            " `to_found` report the added/removed-between-versions case"
+            " explicitly, never as an error."
+        ),
+    )
+    async def diff(
+        country: str = Field(description="Country code, e.g. 'w1', 'us', 'de'."),
+        from_spec: str = Field(
+            description="Version spec for the 'before' side -- exact build string, commit sha, or loose 'major.minor'."
+        ),
+        to_spec: str = Field(description="Version spec for the 'after' side -- same spec forms as from_spec."),
+        path: str | None = Field(
+            default=None,
+            description="File scope: exact repository-relative path. Mutually exclusive with object_type/object_name.",
+        ),
+        object_type: str | None = Field(
+            default=None, description="Symbol scope: AL object type, e.g. 'codeunit', 'page', 'pageextension'."
+        ),
+        object_name: str | None = Field(default=None, description="Symbol scope: AL object name, e.g. 'Sales-Post'."),
+        procedure_name: str | None = Field(
+            default=None,
+            description="Symbol scope, optional: procedure/trigger name. Omit to diff the whole object's text.",
+        ),
+    ) -> Any:
+        return await _forward(
+            registry_url,
+            "bcatlas_diff",
+            {
+                "country": country,
+                "from_spec": from_spec,
+                "to_spec": to_spec,
+                "path": path,
+                "object_type": object_type,
+                "object_name": object_name,
+                "procedure_name": procedure_name,
+            },
+        )
+
+    @mcp.tool(
+        name="bcatlas_symbol_history",
+        description=(
+            "Walk the multi-step change history of a single object/"
+            "procedure across a version range of the SAME country --"
+            " returns only the real points where that symbol's OWN"
+            " resolved text changed, never every commit that merely"
+            " touched its containing file. `granularity` controls the"
+            " shape: 'endpoints' (default) returns just the start/end"
+            " states; 'full' returns every real intermediate change step"
+            " too, including a symbol being added, removed, or reverted"
+            " within the range."
+        ),
+    )
+    async def symbol_history(
+        country: str = Field(description="Country code, e.g. 'w1', 'us', 'de'."),
+        from_spec: str = Field(
+            description="Version spec for the start of the range -- exact build string, commit sha, or loose 'major.minor'."
+        ),
+        to_spec: str = Field(description="Version spec for the end of the range -- same spec forms as from_spec."),
+        object_type: str = Field(description="AL object type, e.g. 'codeunit', 'page', 'pageextension'."),
+        object_name: str = Field(description="AL object name, e.g. 'Sales-Post'."),
+        procedure_name: str | None = Field(
+            default=None, description="Optional: procedure/trigger name. Omit to track the whole object's history."
+        ),
+        granularity: str = Field(
+            default="endpoints",
+            description="'endpoints' (default) for just start/end, or 'full' for every real-change step in between.",
+        ),
+    ) -> Any:
+        return await _forward(
+            registry_url,
+            "bcatlas_symbol_history",
+            {
+                "country": country,
+                "from_spec": from_spec,
+                "to_spec": to_spec,
+                "object_type": object_type,
+                "object_name": object_name,
+                "procedure_name": procedure_name,
+                "granularity": granularity,
+            },
+        )
+
     return mcp
 
 

@@ -35,6 +35,9 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+from . import diff as diff_module
+from . import git_ops
+from . import history as history_module
 from . import resolver
 
 _MCP_INSTRUCTIONS = (
@@ -57,6 +60,14 @@ _MCP_INSTRUCTIONS = (
     " 28 minor 1') into a single unambiguous commit. Resolution never"
     " guesses -- an ambiguous or unrecognized spec is rejected explicitly,"
     " never silently mapped to the wrong version."
+    "\n\n"
+    "Once you have two resolved versions of the same country,"
+    " `bcatlas_diff` diffs one file or one object/procedure between them"
+    " (never a whole-repository diff -- an unscoped request is rejected),"
+    " and `bcatlas_symbol_history` walks a wider version range for a"
+    " single symbol, returning only the real points where that symbol's"
+    " own text changed -- never every commit that merely touched its"
+    " containing file."
 )
 
 
@@ -75,6 +86,35 @@ def _upstream_unavailable(detail: str) -> dict[str, Any]:
     resolvable-but-not-found/ambiguous spec, which is never an error.
     """
     return {"error": "upstream_unavailable", "detail": detail}
+
+
+def _version_dict(commit_sha: str, version_string: str) -> dict[str, Any]:
+    return {"commit_sha": commit_sha, "version_string": version_string}
+
+
+async def _resolve_spec(
+    loop: asyncio.AbstractEventLoop, country: str, spec: str, which: str
+) -> tuple[resolver.ResolvedVersion | None, dict[str, Any] | None]:
+    """Resolve one `(country, spec)` pair for a tool (`bcatlas_diff`,
+    `bcatlas_symbol_history`) that needs TWO resolved versions per call.
+    Returns `(ResolvedVersion, None)` on success, or `(None, error_dict)`
+    on failure -- `error_dict` reuses `bcatlas_resolve_version`'s
+    `{resolved: false, reason, detail}` shape (contracts/registry-tools.md
+    "Shared error shape"), with a `which` field ("from_spec"/"to_spec") added
+    since a caller needs to know WHICH of the two specs failed to resolve.
+    An upstream-unreachable failure raises `resolver.UpstreamUnavailableError`
+    -- the caller (each tool below) catches that itself, since it applies
+    to the whole request, not to one spec.
+    """
+    result = await loop.run_in_executor(None, lambda: resolver.resolve_version(country, spec))
+    if isinstance(result, resolver.ResolvedVersion):
+        return result, None
+    return None, {
+        "resolved": False,
+        "which": which,
+        "reason": result.reason,
+        "detail": result.detail,
+    }
 
 
 def create_registry_mcp_server() -> FastMCP:
@@ -179,6 +219,204 @@ def create_registry_mcp_server() -> FastMCP:
             "resolved": False,
             "reason": result.reason,
             "detail": result.detail,
+        }
+
+    @mcp.tool(
+        name="bcatlas_diff",
+        description=(
+            "Diff a single file or a single object/procedure between two"
+            " resolved versions of the SAME country -- never a"
+            " whole-repository diff. Scope with EXACTLY ONE of `path`"
+            " (file scope) or `object_type`+`object_name` (symbol scope,"
+            " optionally narrowed further with `procedure_name` -- omit it"
+            " to diff the whole object). A request with neither, or both,"
+            " is rejected explicitly rather than silently producing a"
+            " large or ambiguous result. Symbol scope is diffed by"
+            " independently locating and extracting the named"
+            " object/procedure in EACH version (never a raw line diff --"
+            " line numbers shift between versions), so `diff_text` only"
+            " ever reflects that symbol's own change. `from_found`/"
+            " `to_found` report the added/removed-between-versions case"
+            " explicitly (e.g. a procedure that didn't exist yet, or was"
+            " later deleted) -- this is never treated as an error. Resolve"
+            " `from_spec`/`to_spec` first with `bcatlas_resolve_version` if"
+            " you don't already have exact identifiers."
+        ),
+    )
+    async def diff(
+        country: str = Field(description="Country code, e.g. 'w1', 'us', 'de'."),
+        from_spec: str = Field(
+            description="Version spec for the 'before' side -- exact build string, commit sha, or loose 'major.minor'."
+        ),
+        to_spec: str = Field(
+            description="Version spec for the 'after' side -- same spec forms as from_spec."
+        ),
+        path: str | None = Field(
+            default=None,
+            description=(
+                "File scope: exact repository-relative path, e.g."
+                " 'Base Application/.../Foo.Codeunit.al'. Mutually"
+                " exclusive with object_type/object_name."
+            ),
+        ),
+        object_type: str | None = Field(
+            default=None,
+            description="Symbol scope: AL object type, e.g. 'codeunit', 'page', 'pageextension'.",
+        ),
+        object_name: str | None = Field(
+            default=None,
+            description="Symbol scope: AL object name, e.g. 'Sales-Post'.",
+        ),
+        procedure_name: str | None = Field(
+            default=None,
+            description=(
+                "Symbol scope, optional: procedure/trigger name within the"
+                " object. Omit to diff the whole object's text instead of"
+                " one procedure."
+            ),
+        ),
+    ) -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        try:
+            from_result, from_error = await _resolve_spec(loop, country, from_spec, "from_spec")
+            if from_error is not None:
+                return from_error
+            to_result, to_error = await _resolve_spec(loop, country, to_spec, "to_spec")
+            if to_error is not None:
+                return to_error
+        except resolver.UpstreamUnavailableError as e:
+            return _upstream_unavailable(str(e))
+
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: diff_module.diff(
+                    country,
+                    from_result.commit_sha,
+                    from_result.version_string,
+                    to_result.commit_sha,
+                    to_result.version_string,
+                    path=path,
+                    object_type=object_type,
+                    object_name=object_name,
+                    procedure_name=procedure_name,
+                ),
+            )
+        except diff_module.DiffScopeError as e:
+            return {"error": "unscoped_diff_rejected", "detail": str(e)}
+        except git_ops.GitOpsError as e:
+            return _upstream_unavailable(str(e))
+
+        return {
+            "scope": result.scope,
+            "country": result.country,
+            "from_version": _version_dict(result.from_commit_sha, result.from_version_string),
+            "to_version": _version_dict(result.to_commit_sha, result.to_version_string),
+            "path": result.path,
+            "symbol": (
+                {
+                    "object_type": result.symbol.object_type,
+                    "object_name": result.symbol.object_name,
+                    "procedure_name": result.symbol.procedure_name,
+                }
+                if result.symbol is not None
+                else None
+            ),
+            "diff_text": result.diff_text,
+            "from_found": result.from_found,
+            "to_found": result.to_found,
+        }
+
+    @mcp.tool(
+        name="bcatlas_symbol_history",
+        description=(
+            "Walk the multi-step change history of a single object/"
+            "procedure across a version range of the SAME country --"
+            " returns only the real points where that symbol's OWN"
+            " resolved text changed, never every commit that merely"
+            " touched its containing file (a common case: shared files get"
+            " touched by unrelated changes constantly). `granularity`"
+            " controls the shape: 'endpoints' (default) returns exactly"
+            " the start and end states (useful to quickly confirm 'did"
+            " this change at all across this range'); 'full' returns every"
+            " real intermediate change step too, including a symbol being"
+            " added, removed, or reverted within the range. Resolve"
+            " `from_spec`/`to_spec` first with `bcatlas_resolve_version` if"
+            " you don't already have exact identifiers."
+        ),
+    )
+    async def symbol_history(
+        country: str = Field(description="Country code, e.g. 'w1', 'us', 'de'."),
+        from_spec: str = Field(
+            description="Version spec for the start of the range -- exact build string, commit sha, or loose 'major.minor'."
+        ),
+        to_spec: str = Field(
+            description="Version spec for the end of the range -- same spec forms as from_spec."
+        ),
+        object_type: str = Field(description="AL object type, e.g. 'codeunit', 'page', 'pageextension'."),
+        object_name: str = Field(description="AL object name, e.g. 'Sales-Post'."),
+        procedure_name: str | None = Field(
+            default=None,
+            description="Optional: procedure/trigger name within the object. Omit to track the whole object's history.",
+        ),
+        granularity: str = Field(
+            default="endpoints",
+            description="'endpoints' (default) for just the start/end states, or 'full' for every real-change step in between.",
+        ),
+    ) -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        try:
+            from_result, from_error = await _resolve_spec(loop, country, from_spec, "from_spec")
+            if from_error is not None:
+                return from_error
+            to_result, to_error = await _resolve_spec(loop, country, to_spec, "to_spec")
+            if to_error is not None:
+                return to_error
+        except resolver.UpstreamUnavailableError as e:
+            return _upstream_unavailable(str(e))
+
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: history_module.build_history(
+                    country,
+                    from_result.commit_sha,
+                    from_result.version_string,
+                    to_result.commit_sha,
+                    to_result.version_string,
+                    object_type,
+                    object_name,
+                    procedure_name,
+                    granularity=granularity,
+                ),
+            )
+        except history_module.SymbolNotLocatedError as e:
+            return {"error": "symbol_not_found", "detail": str(e)}
+        except ValueError as e:
+            return {"error": "invalid_request", "detail": str(e)}
+        except git_ops.GitOpsError as e:
+            return _upstream_unavailable(str(e))
+
+        return {
+            "symbol": {
+                "object_type": result.symbol.object_type,
+                "object_name": result.symbol.object_name,
+                "procedure_name": result.symbol.procedure_name,
+            },
+            "country": result.country,
+            "from_version": _version_dict(result.from_commit_sha, result.from_version_string),
+            "to_version": _version_dict(result.to_commit_sha, result.to_version_string),
+            "granularity": result.granularity,
+            "steps": [
+                {
+                    "commit_sha": step.commit_sha,
+                    "version_string": step.version_string,
+                    "text": step.text,
+                    "found": step.found,
+                    "changed_from_previous": step.changed_from_previous,
+                }
+                for step in result.steps
+            ],
         }
 
     return mcp

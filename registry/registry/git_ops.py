@@ -248,6 +248,49 @@ def commit_message(
     return result.stdout.strip()
 
 
+def list_tree(
+    sha: str,
+    mirror_dir: Path = DEFAULT_MIRROR_DIR,
+    upstream_url: str = UPSTREAM_URL,
+) -> list[str]:
+    """Every real file path in the tree at `sha` (`git ls-tree -r
+    --name-only`), fetching the commit first if not already present.
+
+    Used by diff.py's `locate_symbol_file` to find which file contains a
+    named object: real on-disk AL filenames for extension objects use
+    inconsistent case/abbreviations (e.g. "PageExt"/"Pageext"/"pageext" all
+    occur for the same `pageextension` object_type, confirmed against the
+    real w1-28 corpus), so the target path can't be constructed directly
+    from `object_type`/`object_name` alone -- it must be located by
+    scanning the real committed tree instead. Measured directly against the
+    real ~19k-file w1-28 corpus this session at <20ms, cheap enough to
+    always confirm against real content rather than guess a path.
+    """
+    fetch_commit(sha, mirror_dir, upstream_url)
+    result = _run_git(["ls-tree", "-r", "--name-only", sha], cwd=mirror_dir)
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def diff_paths(
+    from_sha: str,
+    to_sha: str,
+    path: str,
+    mirror_dir: Path = DEFAULT_MIRROR_DIR,
+    upstream_url: str = UPSTREAM_URL,
+) -> str:
+    """Real `git diff <from_sha> <to_sha> -- <path>` text against the shared
+    mirror, fetching both commits first if not already present. Used by
+    diff.py's file-scoped diff (FR-006) -- deliberately scoped to exactly
+    one path, never invoked without one, so a whole-repository diff can
+    never be produced through this function (FR-007 is enforced by the
+    caller, diff.py, before this is ever reached).
+    """
+    fetch_commit(from_sha, mirror_dir, upstream_url)
+    fetch_commit(to_sha, mirror_dir, upstream_url)
+    result = _run_git(["diff", from_sha, to_sha, "--", path], cwd=mirror_dir)
+    return result.stdout
+
+
 def log_for_path(
     path: str,
     from_sha: str,
