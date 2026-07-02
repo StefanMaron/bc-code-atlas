@@ -8,9 +8,15 @@ sales order before posting?"* or *"what subscribes to `OnBeforePostSalesDoc`?"*
 and get real answers grounded in Microsoft's own base-application source, not
 guesses from training data.
 
-This is a proof of concept, built and validated against real queries — see
-[REPORT.md](REPORT.md) for the full findings, benchmarks, and a go/no-go
-recommendation, and [CLAUDE.md](CLAUDE.md) for the original design brief.
+This started as a local, single-version proof of concept — see
+[REPORT.md](REPORT.md) for that phase's findings, benchmarks, and go
+recommendation. The project has since graduated into building the real
+multi-country, multi-version public service; see
+[.specify/memory/constitution.md](.specify/memory/constitution.md) for the
+governing architecture principles and [CLAUDE.md](CLAUDE.md) for current
+status and history. What's below (Quick Start, architecture diagram) still
+describes today's actual runnable setup — single version, local only —
+since the multi-tenant serving layer is being designed, not built yet.
 
 ## Architecture
 
@@ -44,14 +50,20 @@ MCP client ────────▶  │  aggregator (:8800)      │
 - **Graph** (`tools/graphify-al` submodule) — the exact structural
   relationship graph: objects, procedures, event subscriptions, extension
   targets, with real (not inferred) call/subscribe/extend edges extracted
-  from source. Also serves exact source text on demand (`get_signature`,
-  `get_procedure_body`, `get_object_source`), re-read from the real w1-28
-  files rather than the index, for verifying a candidate before trusting it.
+  from source. Also serves exact source text on demand
+  (`bcatlas_get_signature`, `bcatlas_get_procedure_body`,
+  `bcatlas_get_object_source`), re-read from the real w1-28 files rather
+  than the index, for verifying a candidate before trusting it.
 - **Aggregator** (`aggregator/`) — a thin proxy presenting one `/mcp`
   endpoint. No business logic lives here; it forwards each tool call to
   whichever backend implements it. The two backends stay independent and
   swappable — this is deliberate, see CLAUDE.md's rationale for why one tool
   doesn't do both jobs well.
+
+All tool names are prefixed with `bcatlas_` (e.g. `bcatlas_search`,
+`bcatlas_get_neighbors`) — plain names like `search` collide with
+IDE-builtin tools (VS Code's own search, in particular) in some MCP
+clients.
 
 Everything runs locally. No cloud APIs are called at query time (the
 embedding model does a one-time HuggingFace metadata check on first load,

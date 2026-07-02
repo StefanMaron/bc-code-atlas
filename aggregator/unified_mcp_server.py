@@ -45,29 +45,29 @@ _AGGREGATOR_INSTRUCTIONS = (
     "\n\n"
     "Three complementary layers, meant to be used in this order:"
     "\n"
-    "1. `search` -- semantic search by meaning. Use this first to find a"
+    "1. `bcatlas_search` -- semantic search by meaning. Use this first to find a"
     " starting point: real implementations, base-application objects,"
     " call-site examples, or doc pages, even when you don't know the exact"
     " object/procedure/event name."
     "\n"
-    "2. `query_graph`, `get_node`, `get_neighbors`, `get_community`,"
-    " `god_nodes`, `graph_stats`, `shortest_path` -- the exact structural"
+    "2. `bcatlas_query_graph`, `bcatlas_get_node`, `bcatlas_get_neighbors`, `bcatlas_get_community`,"
+    " `bcatlas_god_nodes`, `bcatlas_graph_stats`, `bcatlas_shortest_path` -- the exact structural"
     " relationship graph (objects, procedures, event subscriptions,"
     " extension targets) with real call/subscribe/extend edges extracted"
     " from source. Use these once you have a concrete node to trace: what"
     " calls or subscribes to it, what it extends, or how two BC concepts"
     " connect."
     "\n"
-    "3. `get_signature`, `get_procedure_body`, `get_object_source` -- exact"
+    "3. `bcatlas_get_signature`, `bcatlas_get_procedure_body`, `bcatlas_get_object_source` -- exact"
     " source text re-read from the real w1-28 files for a node the previous"
-    " two steps found. Use `get_signature` as a cheap check that you have"
-    " the right node, then `get_procedure_body`/`get_object_source` to"
+    " two steps found. Use `bcatlas_get_signature` as a cheap check that you have"
+    " the right node, then `bcatlas_get_procedure_body`/`bcatlas_get_object_source` to"
     " verify real behavior (exact params, var types, line-by-line logic)"
     " instead of guessing it from the name alone."
     "\n\n"
-    "A good pattern: `search` for a concept in natural language, then"
-    " `query_graph`/`get_neighbors` on what it finds to see its exact"
-    " connections, then `get_signature`/`get_procedure_body` on the"
+    "A good pattern: `bcatlas_search` for a concept in natural language, then"
+    " `bcatlas_query_graph`/`bcatlas_get_neighbors` on what it finds to see its exact"
+    " connections, then `bcatlas_get_signature`/`bcatlas_get_procedure_body` on the"
     " strongest candidate(s) to confirm the real implementation before"
     " answering or writing code against it."
 )
@@ -107,7 +107,7 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
     mcp = FastMCP("bc-code-atlas", instructions=_AGGREGATOR_INSTRUCTIONS)
 
     @mcp.tool(
-        name="search",
+        name="bcatlas_search",
         description=(
             "Semantic search over Business Central's AL base-application"
             " source and developer docs -- finds code and docs by meaning,"
@@ -149,7 +149,7 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
     ) -> Any:
         return await _forward(
             search_url,
-            "search",
+            "bcatlas_search",
             {
                 "query": query,
                 "limit": limit,
@@ -162,7 +162,7 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         )
 
     @mcp.tool(
-        name="query_graph",
+        name="bcatlas_query_graph",
         description=(
             "Search Business Central's structural knowledge graph (objects,"
             " procedures, event subscriptions, extension targets, real"
@@ -177,8 +177,8 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
             " exact object/procedure/event name) returns a large, mostly"
             " irrelevant subgraph that burns tokens without answering the"
             " question. If you don't already know the exact name, call"
-            " `search` first to find it, then use `get_node`/`get_neighbors`"
-            " on that exact label instead of `query_graph` -- cheaper and far"
+            " `bcatlas_search` first to find it, then use `bcatlas_get_node`/`bcatlas_get_neighbors`"
+            " on that exact label instead of `bcatlas_query_graph` -- cheaper and far"
             " more precise for that case."
         ),
     )
@@ -193,7 +193,7 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
     ) -> Any:
         return await _forward(
             graph_url,
-            "query_graph",
+            "bcatlas_query_graph",
             {
                 "question": question,
                 "mode": mode,
@@ -204,14 +204,14 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         )
 
     @mcp.tool(
-        name="get_node",
+        name="bcatlas_get_node",
         description="Get full details for a specific BC object/procedure node by label or ID.",
     )
     async def get_node(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "get_node", {"label": label})
+        return await _forward(graph_url, "bcatlas_get_node", {"label": label})
 
     @mcp.tool(
-        name="get_neighbors",
+        name="bcatlas_get_neighbors",
         description=(
             "Get all direct neighbors of a BC object/procedure node with edge"
             " details -- e.g. everything that calls or subscribes to it, and"
@@ -222,71 +222,71 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         label: str = Field(description="Node label or ID to look up"),
         relation_filter: str | None = Field(default=None, description="Optional: filter by relation type"),
     ) -> Any:
-        return await _forward(graph_url, "get_neighbors", {"label": label, "relation_filter": relation_filter})
+        return await _forward(graph_url, "bcatlas_get_neighbors", {"label": label, "relation_filter": relation_filter})
 
     @mcp.tool(
-        name="get_signature",
+        name="bcatlas_get_signature",
         description=(
             "Lightweight ground-truth check: the exact declaration header"
             " (object header, or procedure/trigger signature with its return"
             " type) for a node, re-read from the real w1-28 source -- no"
             " body. Use this to confirm a search/graph hit is the right one"
-            " before pulling the full body with get_procedure_body or"
-            " get_object_source."
+            " before pulling the full body with bcatlas_get_procedure_body or"
+            " bcatlas_get_object_source."
         ),
     )
     async def get_signature(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "get_signature", {"label": label})
+        return await _forward(graph_url, "bcatlas_get_signature", {"label": label})
 
     @mcp.tool(
-        name="get_procedure_body",
+        name="bcatlas_get_procedure_body",
         description=(
             "Exact, full source text of one procedure/trigger, re-read from"
             " the real w1-28 source (not the index) -- signature, var"
             " declarations, and every line of the body. Use this once"
-            " search/graph/get_signature has narrowed down to a specific"
+            " search/graph/bcatlas_get_signature has narrowed down to a specific"
             " procedure and you need to verify its real behavior rather than"
             " guess it. Errors if the node isn't inside a procedure/trigger;"
-            " use get_object_source for object-level nodes."
+            " use bcatlas_get_object_source for object-level nodes."
         ),
     )
     async def get_procedure_body(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "get_procedure_body", {"label": label})
+        return await _forward(graph_url, "bcatlas_get_procedure_body", {"label": label})
 
     @mcp.tool(
-        name="get_object_source",
+        name="bcatlas_get_object_source",
         description=(
             "Exact, full source text of the object (table/page/codeunit/...)"
             " a node belongs to, re-read from the real w1-28 source. Pass"
             " either the object's own node or any procedure inside it --"
             " both resolve to the same object source. Can return a lot of"
-            " text for large objects; prefer get_procedure_body when you"
+            " text for large objects; prefer bcatlas_get_procedure_body when you"
             " only need one procedure."
         ),
     )
     async def get_object_source(label: str = Field(description="Node label or ID to look up")) -> Any:
-        return await _forward(graph_url, "get_object_source", {"label": label})
+        return await _forward(graph_url, "bcatlas_get_object_source", {"label": label})
 
-    @mcp.tool(name="get_community", description="Get all nodes in a graph community by community ID.")
+    @mcp.tool(name="bcatlas_get_community", description="Get all nodes in a graph community by community ID.")
     async def get_community(community_id: int = Field(description="Community ID (0-indexed by size)")) -> Any:
-        return await _forward(graph_url, "get_community", {"community_id": community_id})
+        return await _forward(graph_url, "bcatlas_get_community", {"community_id": community_id})
 
     @mcp.tool(
-        name="god_nodes",
+        name="bcatlas_god_nodes",
         description="Return the most connected nodes -- the core abstractions of the base application.",
     )
     async def god_nodes(top_n: int = Field(default=10)) -> Any:
-        return await _forward(graph_url, "god_nodes", {"top_n": top_n})
+        return await _forward(graph_url, "bcatlas_god_nodes", {"top_n": top_n})
 
     @mcp.tool(
-        name="graph_stats",
+        name="bcatlas_graph_stats",
         description="Summary statistics for the structural graph: node count, edge count, communities, confidence breakdown.",
     )
     async def graph_stats() -> Any:
-        return await _forward(graph_url, "graph_stats", {})
+        return await _forward(graph_url, "bcatlas_graph_stats", {})
 
     @mcp.tool(
-        name="shortest_path",
+        name="bcatlas_shortest_path",
         description=(
             "Find the shortest structural path between two BC concepts --"
             " e.g. how a table field's value ends up propagated into a"
@@ -298,7 +298,7 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         target: str = Field(description="Target concept label or keyword"),
         max_hops: int = Field(default=8, description="Maximum hops to consider"),
     ) -> Any:
-        return await _forward(graph_url, "shortest_path", {"source": source, "target": target, "max_hops": max_hops})
+        return await _forward(graph_url, "bcatlas_shortest_path", {"source": source, "target": target, "max_hops": max_hops})
 
     return mcp
 

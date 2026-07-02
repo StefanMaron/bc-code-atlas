@@ -2,10 +2,13 @@
 
 cocoindex-code's own `ccc mcp` CLI command hard-codes stdio transport
 (cli.py calls `mcp_server.run_stdio_async()`, no --host/--port/--transport
-flag exists). This PoC needs the MCP server reachable over HTTP from a
-separate Claude Code session, exactly like a remote deployment would be, so
-this script builds a `search` tool on the same daemon client functions
+flag exists). This needs the MCP server reachable over HTTP from a separate
+Claude Code session, exactly like a remote deployment would be, so this
+script builds a `bcatlas_search` tool on the same daemon client functions
 `create_mcp_server()` uses and serves it over Streamable HTTP instead.
+Tool names are prefixed with `bcatlas_` -- plain names like `search`
+collide with IDE-builtin tools (e.g. VS Code's own search) in some MCP
+clients.
 
 It also adds one behavior on top of stock cocoindex-code: BC's own AL source
 tree gives ~40% of all AL chunks to Tests-*/`*Test*`/`*Test Library*`
@@ -84,7 +87,7 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
     mcp = FastMCP("cocoindex-code", instructions=_MCP_INSTRUCTIONS)
 
     @mcp.tool(
-        name="search",
+        name="bcatlas_search",
         description=(
             "Semantic search over Business Central's AL base-application"
             " source and developer docs -- finds code and docs by meaning,"
