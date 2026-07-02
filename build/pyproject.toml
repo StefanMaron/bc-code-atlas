@@ -6,7 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "bc-code-atlas-build"
 version = "0.1.0"
 description = "Build/serve split for bc-code-atlas: bounded build queue, incremental clone-nearest-warm-sibling builds, staging + atomic promote, LRU/TTL eviction"
-requires-python = ">=3.11"
+# Deviation from chunker/aggregator's ">=3.11", matching registry/pyproject.toml's
+# same deviation and reasoning: this project depends on `registry` (below,
+# path dependency) for git_ops/resolver reuse in incremental.py, and registry
+# itself requires >=3.13 (tree-sitter-al>=3.0.1 only ships wheels for
+# Python>=3.12; plan.md's stated target is 3.13 anyway).
+requires-python = ">=3.13"
 dependencies = [
     # Matches chunker/aggregator's existing pin (see aggregator/pyproject.toml).
     "mcp>=1.0",
@@ -15,7 +20,18 @@ dependencies = [
     # against a staging path (research.md "incremental builds via clone-
     # nearest-warm-sibling" decision; constitution Principle VI: cocoindex-code
     # stays unforked and un-imported-in-process by this service).
+    #
+    # Path dependency on registry/ (T024/T027): reuses registry.git_ops (shared
+    # upstream mirror, fetch_commit/read_blob/list_commits plumbing) and
+    # registry.resolver (parse_version_string, resolve_version) rather than
+    # reimplementing either -- constitution "Prefer composing existing,
+    # verified primitives". Only ever imported read-only; this project never
+    # edits registry/.
+    "bc-code-atlas-registry",
 ]
+
+[tool.uv.sources]
+bc-code-atlas-registry = { path = "../registry" }
 
 [tool.setuptools.packages.find]
 include = ["build*"]
