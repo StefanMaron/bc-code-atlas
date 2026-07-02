@@ -20,6 +20,12 @@ __pycache__/
 **/.cocoindex_code/*.sqlite*
 **/graphify-out/
 
+# Multi-version serving runtime state (specs/001-multi-version-serving) --
+# all rebuildable from the upstream repo, per constitution Principle III
+/data/.upstream-mirror/
+/data/warm/
+/data/staging/
+
 # Local tool state -- never publish
 .claude/
 .serena/

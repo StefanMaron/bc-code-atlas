@@ -180,6 +180,74 @@ def read_blob(
     return result.stdout
 
 
+def _branch_ref(branch: str) -> str:
+    return f"refs/bcatlas/branches/{branch}"
+
+
+def list_commits(
+    branch: str,
+    mirror_dir: Path = DEFAULT_MIRROR_DIR,
+    upstream_url: str = UPSTREAM_URL,
+) -> list[tuple[str, str]]:
+    """`(commit_sha, commit_message)` pairs reachable on `branch`, newest
+    first (plain `git log` order -- callers needing a different order, e.g.
+    resolver.py picking a max, don't care about order at all).
+
+    Used by resolver.py to enumerate a country/major-version branch's real
+    build history for version-spec resolution (exact and loose "major.minor"
+    matching) -- there is no cheaper way to learn every build's exact
+    version string than reading each commit's message.
+
+    Fetches the branch with `--filter=blob:none` (a "blobless" partial
+    clone) rather than a full fetch or per-commit shallow fetches: this
+    pulls every commit + tree on the branch (enough to read `%H`/`%s` for
+    all of them) without downloading historical file contents, which this
+    function never needs. Verified directly against the real upstream repo
+    this session: a full blobless fetch of `w1-28` (4075 commits) took ~25s
+    and ~130MB the first time, then <1s on a repeat call against the same
+    mirror (git's own fetch-negotiation short-circuits already-present
+    history) -- safe to call on every resolution request, not just once.
+
+    Lands on a persistent local ref (`refs/bcatlas/branches/<branch>`), same
+    rationale as `fetch_commit`'s per-commit refs: keeps the history
+    reachable/safe from GC and re-fetchable without relying on ephemeral
+    `FETCH_HEAD`.
+    """
+    _ensure_mirror(mirror_dir, upstream_url)
+    ref = _branch_ref(branch)
+    _run_git(
+        ["fetch", "origin", f"{branch}:{ref}", "--filter=blob:none"],
+        cwd=mirror_dir,
+    )
+    # \x1f (unit separator) as the sha/message delimiter -- commit messages
+    # here are single-line version strings (never contain it), unlike a
+    # space or tab which could theoretically appear in one.
+    result = _run_git(["log", "--format=%H\x1f%s", ref], cwd=mirror_dir)
+    commits: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip("\n")
+        if not line:
+            continue
+        sha, _, message = line.partition("\x1f")
+        commits.append((sha, message))
+    return commits
+
+
+def commit_message(
+    sha: str,
+    mirror_dir: Path = DEFAULT_MIRROR_DIR,
+    upstream_url: str = UPSTREAM_URL,
+) -> str:
+    """The exact commit message for `sha` (resolver.py's exact-commit-sha
+    resolution path needs this -- the message IS the version string, per
+    this repository's convention). Fetches the commit first if it isn't
+    already present locally.
+    """
+    fetch_commit(sha, mirror_dir, upstream_url)
+    result = _run_git(["log", "-1", "--format=%s", sha], cwd=mirror_dir)
+    return result.stdout.strip()
+
+
 def log_for_path(
     path: str,
     from_sha: str,

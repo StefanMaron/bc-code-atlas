@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+from pathlib import Path
 
 from cocoindex_code.server import CodeChunkResult, SearchResultModel
 from mcp.server.fastmcp import FastMCP
@@ -78,6 +79,52 @@ _MAX_FETCH_LIMIT = 100
 
 def _is_test_path(file_path: str) -> bool:
     return any(_TEST_PATH_SEGMENT.search(seg) for seg in file_path.split("/")[:-1])
+
+
+# --- multi-tenant routing (T028, specs/001-multi-version-serving) ---------
+#
+# Mirrors build/build/layout.py's `warm_search_dir(country, version)`
+# convention (`data/warm/<country>/<version>/search`) rather than importing
+# it: chunker is a separately deployable serving process (constitution
+# Principle II -- build and serve are separate resource pools/processes),
+# has no dependency today on the `build/` project (which is being built in
+# parallel by another agent as of this change), and the two conventions
+# must stay byte-identical regardless of which project changes first. If a
+# tiny shared "layout" package is ever extracted, this should import that
+# instead of hand-duplicating the convention -- tracked as a follow-up, not
+# done here.
+def _warm_search_dir(country: str, version: str) -> Path:
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / "data" / "warm" / country / version / "search"
+
+
+def _invalid_warm_project_reason(path: Path) -> str | None:
+    """None if `path` looks like a finished, servable cocoindex-code
+    project; otherwise a caller-facing reason it isn't.
+
+    Deliberately a pure filesystem check, not a daemon round-trip: a
+    (country, version) that was requested but never built, or is still
+    mid-build in a staging path (never promoted here), must fail clearly
+    rather than silently opening a directory that doesn't have an index in
+    it yet -- see contracts/build-serve-tools.md "no direct filesystem
+    exposure" and constitution Principle II (a build MUST NOT be raced by a
+    concurrent read of the same artifact; this check only ever looks at the
+    *warm*, promoted path, never a staging path).
+    """
+    if not path.is_dir():
+        return f"No warm data found for this (country, version) -- expected a built index at {path}."
+    try:
+        from cocoindex_code.settings import target_sqlite_db_path
+
+        db_path = target_sqlite_db_path(path)
+    except Exception:
+        db_path = path / ".cocoindex_code" / "target_sqlite.db"
+    if not db_path.exists():
+        return (
+            f"{path} exists but has no finished index yet (missing"
+            f" {db_path.name}) -- build may still be in progress."
+        )
+    return None
 
 
 def create_filtered_mcp_server(project_root: str) -> FastMCP:
@@ -158,18 +205,70 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 " want when looking for a real implementation."
             ),
         ),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') identifying a specific,"
+                " already-built (country, version) pair to search instead of"
+                " this server's default corpus. Must be supplied together"
+                " with `version` -- resolve both first (e.g. via the"
+                " registry server's discovery/resolve tools). Omit both to"
+                " search the default corpus."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact resolved version string (e.g."
+                " 'w1-28.2.50931.52151') identifying a specific,"
+                " already-built (country, version) pair to search, paired"
+                " with `country`. Omit both to search the default corpus."
+            ),
+        ),
     ) -> SearchResultModel:
         """Query the codebase index via the daemon, filtering out test paths by default."""
         loop = asyncio.get_event_loop()
         try:
+            # Multi-tenant routing (T028): a caller that supplies neither
+            # country nor version gets today's exact behavior unchanged --
+            # the one project_root this server was started with, honoring
+            # `refresh_index` as before. A caller that supplies both routes
+            # to that specific (country, version) pair's warm search
+            # directory instead. Historical (country, version) builds are
+            # immutable once promoted (constitution Principle III), so
+            # re-indexing them on every query would be wasted work and risks
+            # racing an external build process's own writes to that same
+            # path (Principle II) -- refresh_index is therefore only ever
+            # honored for this server's own default/originally-configured
+            # corpus, never for a routed (country, version).
+            target_root = project_root
+            if country is not None or version is not None:
+                if not country or not version:
+                    return SearchResultModel(
+                        success=False,
+                        message=(
+                            "Both `country` and `version` must be supplied"
+                            " together to search a specific (country,"
+                            " version) pair. Resolve an exact version first"
+                            " (e.g. via the registry server's"
+                            " bcatlas_resolve_version tool), then pass both."
+                        ),
+                    )
+                warm_dir = _warm_search_dir(country, version)
+                invalid_reason = _invalid_warm_project_reason(warm_dir)
+                if invalid_reason:
+                    return SearchResultModel(success=False, message=invalid_reason)
+                target_root = str(warm_dir)
+                refresh_index = False
+
             if refresh_index:
-                await loop.run_in_executor(None, lambda: _client.index(project_root))
+                await loop.run_in_executor(None, lambda: _client.index(target_root))
 
             if include_tests:
                 resp = await loop.run_in_executor(
                     None,
                     lambda: _client.search(
-                        project_root=project_root,
+                        project_root=target_root,
                         query=query,
                         languages=languages,
                         paths=paths,
@@ -191,7 +290,7 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                     resp = await loop.run_in_executor(
                         None,
                         lambda fl=fetch_limit: _client.search(
-                            project_root=project_root,
+                            project_root=target_root,
                             query=query,
                             languages=languages,
                             paths=paths,
