@@ -78,6 +78,11 @@ async def _forward(url: str, tool: str, arguments: dict[str, Any]) -> Any:
     clients get the same shape they'd get calling the backend directly; falls
     back to concatenated text content for the graph server's plain-text tools.
     """
+    # Backends' JSON schemas mark optional array/string params as simply
+    # absent-when-unset, not nullable -- forwarding an explicit `None` (which
+    # FastMCP always includes for unset Optional[...] Field() params) fails
+    # their input validation. Omit anything unset instead of nulling it.
+    arguments = {k: v for k, v in arguments.items() if v is not None}
     async with _backend_session(url) as session:
         result = await session.call_tool(tool, arguments)
     text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
