@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "bc-code-search": {
+      "type": "http",
+      "url": "http://localhost:8801/mcp"
+    },
+    "bc-code-graph": {
+      "type": "http",
+      "url": "http://localhost:8802/mcp"
+    }
+  }
+}

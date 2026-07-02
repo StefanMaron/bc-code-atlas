@@ -1,0 +1,12 @@
+include_patterns:
+  - "**/*.al"
+  - "**/*.md"
+exclude_patterns:
+  - "**/.git/**"
+  - "**/graphify-out/**"
+language_overrides:
+  - ext: al
+    lang: al
+chunkers:
+  - ext: al
+    module: al_chunker:al_chunker

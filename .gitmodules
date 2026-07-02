@@ -1,0 +1,20 @@
+[submodule "data/w1-28-src"]
+	path = data/w1-28-src
+	url = https://github.com/StefanMaron/MSDyn365BC.Sandbox.Code.History.git
+	branch = w1-28
+[submodule "data/docs"]
+	path = data/docs
+	url = https://github.com/MicrosoftDocs/dynamics365smb-docs.git
+	branch = main
+[submodule "tools/cocoindex-code"]
+	path = tools/cocoindex-code
+	url = https://github.com/cocoindex-io/cocoindex-code.git
+	branch = main
+[submodule "tools/tree-sitter-al"]
+	path = tools/tree-sitter-al
+	url = https://github.com/SShadowS/tree-sitter-al.git
+	branch = main
+[submodule "tools/graphify-al"]
+	path = tools/graphify-al
+	url = https://github.com/StefanMaron/graphify-al.git
+	branch = bc-code-atlas-fixes

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+.venv/
+
+# Runtime logs
+*.log
+
+# Generated index / graph data (regenerate locally, see README)
+# -- settings.yml under .cocoindex_code/ is real config, keep it tracked
+**/.cocoindex_code/*.db
+**/.cocoindex_code/*.sqlite*
+**/graphify-out/
+
+# Local tool state -- never publish
+.claude/
+.serena/

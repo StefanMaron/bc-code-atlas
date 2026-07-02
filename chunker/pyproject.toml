@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bc-al-chunker"
+version = "0.1.0"
+description = "AL-aware chunker plugin for cocoindex-code, backed by tree-sitter-al"
+requires-python = ">=3.11"
+dependencies = [
+    "tree-sitter>=0.24",
+    "tree-sitter-al>=3.0.1",
+]
+
+[tool.setuptools]
+py-modules = ["al_chunker"]
