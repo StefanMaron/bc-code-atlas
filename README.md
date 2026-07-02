@@ -32,14 +32,21 @@ MCP client ────────▶  │  aggregator (:8800)      │
 ```
 
 - **Search** (`chunker/`, backed by the `tools/cocoindex-code` submodule) —
-  semantic search over the w1-28 base-application AL source plus the
-  `dynamics365smb-devitpro` docs, using a custom AL-aware chunker
-  (`chunker/al_chunker.py`, built on `tree-sitter-al`) so chunks align with
-  real AL objects/procedures instead of naive line splitting.
+  semantic search over the w1-28 base-application AL source plus two docs
+  sources: `dynamics365smb-docs` (`business-central/`, functional/admin
+  docs) and `dynamics365smb-devitpro-pb` (`dev-itpro/developer/`, the AL
+  language/compiler reference -- diagnostics, properties, methods). The
+  original brief named this second repo `dynamics365smb-devitpro`; that
+  repo no longer exists under that name, it's now the `-pb` (public) repo
+  above. Uses a custom AL-aware chunker (`chunker/al_chunker.py`, built on
+  `tree-sitter-al`) so AL chunks align with real objects/procedures instead
+  of naive line splitting.
 - **Graph** (`tools/graphify-al` submodule) — the exact structural
   relationship graph: objects, procedures, event subscriptions, extension
   targets, with real (not inferred) call/subscribe/extend edges extracted
-  from source.
+  from source. Also serves exact source text on demand (`get_signature`,
+  `get_procedure_body`, `get_object_source`), re-read from the real w1-28
+  files rather than the index, for verifying a candidate before trusting it.
 - **Aggregator** (`aggregator/`) — a thin proxy presenting one `/mcp`
   endpoint. No business logic lives here; it forwards each tool call to
   whichever backend implements it. The two backends stay independent and
@@ -57,6 +64,13 @@ Requires [uv](https://docs.astral.sh/uv/).
 ```bash
 git clone --recurse-submodules <this-repo-url>
 cd bc-code-atlas
+
+# 0. The two docs submodules point at full Microsoft docs repos (functional
+#    docs + the separate AL developer/compiler reference); only a subtree of
+#    each is actually relevant here, so restrict each to a sparse checkout
+#    before indexing -- this keeps clone/index size and time reasonable.
+git -C data/docs sparse-checkout init --cone && git -C data/docs sparse-checkout set business-central
+git -C data/docs-devitpro sparse-checkout init --cone && git -C data/docs-devitpro sparse-checkout set dev-itpro/developer
 
 # 1. Build each subproject's venv
 uv sync --project tools/cocoindex-code
@@ -116,7 +130,8 @@ fast enough to run directly on CPU.
 ## What's excluded from this repo, and why
 
 - **Third-party source is never vendored** — `data/w1-28-src`, `data/docs`,
-  `tools/cocoindex-code`, `tools/tree-sitter-al`, `tools/graphify-al` are git
+  `data/docs-devitpro`, `tools/cocoindex-code`, `tools/tree-sitter-al`,
+  `tools/graphify-al` are git
   submodules pointing at their real upstreams/forks. `tools/graphify-al`
   points at a fork branch (`StefanMaron/graphify-al@bc-code-atlas-fixes`)
   with real bug fixes found while building this PoC (directed-graph

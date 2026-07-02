@@ -45,8 +45,9 @@ _MCP_INSTRUCTIONS = (
     " reviewing AL customizations."
     "\n\n"
     "Indexed corpus: the w1-28 base application source (extracted from"
-    " Microsoft's own build, not decompiled) plus the public"
-    " dynamics365smb-devitpro developer docs, in one combined index."
+    " Microsoft's own build, not decompiled), the public functional/admin"
+    " BC docs, and the public AL developer/compiler reference (diagnostics,"
+    " properties, methods), all in one combined index."
     "\n\n"
     "Use this to find how BC itself implements something (e.g. posting"
     " logic, a table/page/codeunit you're extending, an API pattern),"
@@ -208,10 +209,15 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                     CodeChunkResult(
                         file_path=r.file_path,
                         language=r.language,
-                        content=r.content,
+                        # W1-28's source is CRLF -- the raw \r survives into
+                        # every chunk and costs a token per line for no
+                        # information (AL isn't whitespace-sensitive).
+                        content=r.content.replace("\r\n", "\n").replace("\r", "\n"),
                         start_line=r.start_line,
                         end_line=r.end_line,
-                        score=r.score,
+                        # Full float precision (~17 sig figs) is meaningless
+                        # for a similarity score and costs tokens for nothing.
+                        score=round(r.score, 4),
                     )
                     for r in kept
                 ],

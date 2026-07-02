@@ -39,27 +39,37 @@ _AGGREGATOR_INSTRUCTIONS = (
     " customizations."
     "\n\n"
     "Indexed corpus: the w1-28 base application source (extracted from"
-    " Microsoft's own build, not decompiled) plus the public"
-    " dynamics365smb-devitpro developer docs."
+    " Microsoft's own build, not decompiled), the public functional/admin"
+    " BC docs, and the public AL developer/compiler reference (diagnostics,"
+    " properties, methods)."
     "\n\n"
-    "Two complementary ways to query it:"
+    "Three complementary layers, meant to be used in this order:"
     "\n"
-    "- `search` -- semantic search by meaning. Use this first to find a"
+    "1. `search` -- semantic search by meaning. Use this first to find a"
     " starting point: real implementations, base-application objects,"
     " call-site examples, or doc pages, even when you don't know the exact"
     " object/procedure/event name."
     "\n"
-    "- `query_graph`, `get_node`, `get_neighbors`, `get_community`,"
+    "2. `query_graph`, `get_node`, `get_neighbors`, `get_community`,"
     " `god_nodes`, `graph_stats`, `shortest_path` -- the exact structural"
     " relationship graph (objects, procedures, event subscriptions,"
     " extension targets) with real call/subscribe/extend edges extracted"
     " from source. Use these once you have a concrete node to trace: what"
     " calls or subscribes to it, what it extends, or how two BC concepts"
     " connect."
+    "\n"
+    "3. `get_signature`, `get_procedure_body`, `get_object_source` -- exact"
+    " source text re-read from the real w1-28 files for a node the previous"
+    " two steps found. Use `get_signature` as a cheap check that you have"
+    " the right node, then `get_procedure_body`/`get_object_source` to"
+    " verify real behavior (exact params, var types, line-by-line logic)"
+    " instead of guessing it from the name alone."
     "\n\n"
     "A good pattern: `search` for a concept in natural language, then"
-    " `query_graph` or `get_neighbors` on what it finds to see its exact"
-    " connections."
+    " `query_graph`/`get_neighbors` on what it finds to see its exact"
+    " connections, then `get_signature`/`get_procedure_body` on the"
+    " strongest candidate(s) to confirm the real implementation before"
+    " answering or writing code against it."
 )
 
 
@@ -160,6 +170,16 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
             " relevant nodes and edges as text context. Example question:"
             " 'what subscribes to OnBeforePostSalesDoc' or 'what does"
             " Codeunit 80 call'."
+            "\n\n"
+            "Only use this when you already have a specific, correctly-named"
+            " symbol to trace from -- it does a broad BFS/DFS over the whole"
+            " graph and a vague question (e.g. a general topic instead of an"
+            " exact object/procedure/event name) returns a large, mostly"
+            " irrelevant subgraph that burns tokens without answering the"
+            " question. If you don't already know the exact name, call"
+            " `search` first to find it, then use `get_node`/`get_neighbors`"
+            " on that exact label instead of `query_graph` -- cheaper and far"
+            " more precise for that case."
         ),
     )
     async def query_graph(
@@ -203,6 +223,49 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
         relation_filter: str | None = Field(default=None, description="Optional: filter by relation type"),
     ) -> Any:
         return await _forward(graph_url, "get_neighbors", {"label": label, "relation_filter": relation_filter})
+
+    @mcp.tool(
+        name="get_signature",
+        description=(
+            "Lightweight ground-truth check: the exact declaration header"
+            " (object header, or procedure/trigger signature with its return"
+            " type) for a node, re-read from the real w1-28 source -- no"
+            " body. Use this to confirm a search/graph hit is the right one"
+            " before pulling the full body with get_procedure_body or"
+            " get_object_source."
+        ),
+    )
+    async def get_signature(label: str = Field(description="Node label or ID to look up")) -> Any:
+        return await _forward(graph_url, "get_signature", {"label": label})
+
+    @mcp.tool(
+        name="get_procedure_body",
+        description=(
+            "Exact, full source text of one procedure/trigger, re-read from"
+            " the real w1-28 source (not the index) -- signature, var"
+            " declarations, and every line of the body. Use this once"
+            " search/graph/get_signature has narrowed down to a specific"
+            " procedure and you need to verify its real behavior rather than"
+            " guess it. Errors if the node isn't inside a procedure/trigger;"
+            " use get_object_source for object-level nodes."
+        ),
+    )
+    async def get_procedure_body(label: str = Field(description="Node label or ID to look up")) -> Any:
+        return await _forward(graph_url, "get_procedure_body", {"label": label})
+
+    @mcp.tool(
+        name="get_object_source",
+        description=(
+            "Exact, full source text of the object (table/page/codeunit/...)"
+            " a node belongs to, re-read from the real w1-28 source. Pass"
+            " either the object's own node or any procedure inside it --"
+            " both resolve to the same object source. Can return a lot of"
+            " text for large objects; prefer get_procedure_body when you"
+            " only need one procedure."
+        ),
+    )
+    async def get_object_source(label: str = Field(description="Node label or ID to look up")) -> Any:
+        return await _forward(graph_url, "get_object_source", {"label": label})
 
     @mcp.tool(name="get_community", description="Get all nodes in a graph community by community ID.")
     async def get_community(community_id: int = Field(description="Community ID (0-indexed by size)")) -> Any:

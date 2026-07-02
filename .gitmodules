@@ -23,3 +23,8 @@
 	url = https://github.com/StefanMaron/graphify-al.git
 	branch = bc-code-atlas-fixes
 	shallow = true
+[submodule "data/docs-devitpro"]
+	path = data/docs-devitpro
+	url = https://github.com/MicrosoftDocs/dynamics365smb-devitpro-pb.git
+	branch = main
+	shallow = true
