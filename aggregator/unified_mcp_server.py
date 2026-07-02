@@ -241,19 +241,44 @@ def create_aggregator(search_url: str, graph_url: str) -> FastMCP:
 
 
 def main() -> None:
+    import os
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8800)
     parser.add_argument("--search-url", default="http://127.0.0.1:8801/mcp")
     parser.add_argument("--graph-url", default="http://127.0.0.1:8802/mcp")
+    parser.add_argument(
+        "--public-hostname",
+        default=os.environ.get("AGGREGATOR_PUBLIC_HOSTNAME"),
+        help=(
+            "Public hostname this server is reachable at behind a reverse"
+            " proxy/tunnel (env: AGGREGATOR_PUBLIC_HOSTNAME). The MCP"
+            " transport's DNS-rebinding protection only allows"
+            " Host: localhost/127.0.0.1 by default -- a tunnel forwards the"
+            " original public Host header unchanged, so without this every"
+            " request gets rejected with 'Invalid Host header' before it"
+            " even reaches a tool."
+        ),
+    )
     args = parser.parse_args()
 
     mcp_server = create_aggregator(args.search_url, args.graph_url)
     mcp_server.settings.host = args.host
     mcp_server.settings.port = args.port
+    if args.public_hostname:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        base = mcp_server.settings.transport_security
+        mcp_server.settings.transport_security = TransportSecuritySettings(
+            allowed_hosts=[*base.allowed_hosts, args.public_hostname, f"{args.public_hostname}:*"],
+            allowed_origins=[*base.allowed_origins, f"https://{args.public_hostname}", f"http://{args.public_hostname}"],
+        )
     print(f"bc-code-atlas unified MCP server (streamable-http) on http://{args.host}:{args.port}/mcp")
     print(f"  search  -> {args.search_url}")
     print(f"  graph   -> {args.graph_url}")
+    if args.public_hostname:
+        print(f"  public hostname allow-listed -> {args.public_hostname}")
     asyncio.run(mcp_server.run_streamable_http_async())
 
 
