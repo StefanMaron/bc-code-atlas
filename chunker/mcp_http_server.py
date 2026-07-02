@@ -34,17 +34,30 @@ from cocoindex_code.server import CodeChunkResult, SearchResultModel
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-# Same instructions cocoindex_code.server uses for its own MCP server
-# (duplicated rather than imported since it's a module-private symbol there).
+# Domain-specific instructions -- NOT cocoindex_code's own generic
+# instructions (which say nothing about what corpus is actually indexed).
+# An agent connecting to this server has zero prior context that it's
+# looking at Business Central at all unless this says so explicitly.
 _MCP_INSTRUCTIONS = (
-    "Code search and codebase understanding tools."
-    "\n"
-    "Use when you need to find code, understand how something works,"
-    " locate implementations, or explore an unfamiliar codebase."
-    "\n"
-    "Provides semantic search that understands meaning --"
-    " unlike grep or text matching,"
-    " it finds relevant code even when exact keywords are unknown."
+    "Semantic search over Microsoft Dynamics 365 Business Central's AL"
+    " base-application source and official developer documentation --"
+    " for dependency and implementation investigation before writing or"
+    " reviewing AL customizations."
+    "\n\n"
+    "Indexed corpus: the w1-28 base application source (extracted from"
+    " Microsoft's own build, not decompiled) plus the public"
+    " dynamics365smb-devitpro developer docs, in one combined index."
+    "\n\n"
+    "Use this to find how BC itself implements something (e.g. posting"
+    " logic, a table/page/codeunit you're extending, an API pattern),"
+    " locate real call-site examples, or check official docs -- before"
+    " guessing at AL syntax or event names from training data alone."
+    " Finds relevant code by meaning, unlike grep or text matching, even"
+    " when exact keywords are unknown."
+    "\n\n"
+    "For the exact structural relationship graph (what calls/subscribes"
+    " to a given object, extension targets, shortest path between two"
+    " concepts) see the companion graph MCP server instead."
 )
 
 # Matches a whole path segment like "Tests-ERM", "System Application Test",
@@ -72,14 +85,17 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
     @mcp.tool(
         name="search",
         description=(
-            "Semantic code search across the entire codebase"
-            " -- finds code by meaning, not just text matching."
-            " Use this instead of grep/glob when you need to find implementations,"
-            " understand how features work,"
-            " or locate related code without knowing exact names or keywords."
+            "Semantic search over Business Central's AL base-application"
+            " source and developer docs -- finds code and docs by meaning,"
+            " not just text matching."
+            " Use this instead of grep/glob when you need to find how BC"
+            " itself implements something, understand how a feature works,"
+            " or locate related code/docs without knowing exact object,"
+            " procedure, or event names."
             " Accepts natural language queries"
-            " (e.g., 'authentication logic', 'database connection handling')"
-            " or code snippets."
+            " (e.g., 'sales order posting validation', 'outbound REST call"
+            " from AL')"
+            " or AL code snippets."
             " Returns matching code chunks with file paths,"
             " line numbers, and relevance scores."
             " Test codeunits (Tests-*, *Test Library*, etc.) are excluded by"
@@ -93,11 +109,11 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
     async def search(
         query: str = Field(
             description=(
-                "Natural language query or code snippet to search for."
-                " Examples: 'error handling middleware',"
-                " 'how are users authenticated',"
-                " 'database connection pool',"
-                " or paste a code snippet to find similar code."
+                "Natural language query or AL code snippet to search for."
+                " Examples: 'sales order posting validation',"
+                " 'how are customers authenticated',"
+                " 'outbound REST call from AL',"
+                " or paste an AL snippet to find similar code."
             )
         ),
         limit: int = Field(
