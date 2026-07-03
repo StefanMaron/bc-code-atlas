@@ -159,6 +159,74 @@ cd tools/graphify-al && uv run python -m graphify update ../../data/w1-28-src &&
 transcripts of real queries run against a separate Claude Code session,
 matching CLAUDE.md's two validation scenarios).
 
+## Connecting to the hosted instance
+
+If you're a tester connecting to someone else's already-running instance
+(exposed per [CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)) rather than
+running your own locally, you'll be given a hostname plus a **Cloudflare
+Access Service Token** (a `CF-Access-Client-Id` / `CF-Access-Client-Secret`
+pair) — the tunnel's Access gate rejects everything else with a `403`.
+Never commit the secret to a repo or paste it in plain text where it'll
+persist; the examples below use a placeholder.
+
+### Claude Code
+
+Project-scoped `.mcp.json` (or `claude mcp add --transport http bc-code-atlas
+https://<hostname>/mcp --header "CF-Access-Client-Id: <client-id>" --header
+"CF-Access-Client-Secret: <client-secret>"`):
+
+```json
+{
+  "mcpServers": {
+    "bc-code-atlas": {
+      "type": "http",
+      "url": "https://<hostname>/mcp",
+      "headers": {
+        "CF-Access-Client-Id": "<client-id>",
+        "CF-Access-Client-Secret": "<client-secret>"
+      }
+    }
+  }
+}
+```
+
+### GitHub Copilot (VS Code / Visual Studio / JetBrains)
+
+`.vscode/mcp.json` (workspace) or the user-profile `mcp.json` — using the
+`inputs` block prompts for the secret instead of storing it in the file at
+all, which is the preferred way to avoid it ending up in source control:
+
+```json
+{
+  "inputs": [
+    {
+      "id": "cf-access-client-id",
+      "type": "promptString",
+      "description": "Cloudflare Access Client ID for bc-code-atlas"
+    },
+    {
+      "id": "cf-access-client-secret",
+      "type": "promptString",
+      "description": "Cloudflare Access Client Secret for bc-code-atlas",
+      "password": true
+    }
+  ],
+  "servers": {
+    "bc-code-atlas": {
+      "type": "http",
+      "url": "https://<hostname>/mcp",
+      "headers": {
+        "CF-Access-Client-Id": "${input:cf-access-client-id}",
+        "CF-Access-Client-Secret": "${input:cf-access-client-secret}"
+      }
+    }
+  }
+}
+```
+
+VS Code prompts once per window and caches the answer for the session — you
+won't be asked again until you reload.
+
 ## Usage
 
 Everything below is a single MCP tool call through the aggregator
@@ -184,6 +252,7 @@ Principle I). All tool names are prefixed `bcatlas_`.
 | `bcatlas_resolve_version` | Resolve an exact or loose version spec to one unambiguous build |
 | `bcatlas_diff` | File- or symbol-scoped diff between two versions of the same country |
 | `bcatlas_symbol_history` | Every real point a specific symbol's own text changed across a version range |
+| `bcatlas_list_warm_versions` | Every (country, version) pair already built and instantly queryable, no build wait |
 | `bcatlas_request_version` | Build/warm a (country, version) pair not yet available |
 | `bcatlas_version_status` | Poll a requested build's state |
 
@@ -206,7 +275,10 @@ bcatlas_get_procedure_body(label="Codeunit 80 PostSalesDoc")
    like `"28.1"`) to one unambiguous build:
    `bcatlas_resolve_version(country="us", spec="28.1")` →
    `{resolved: true, commit_sha: "...", version_string: "us-28.1...."}`.
-3. **Request** it if not already warm, then **poll** until ready:
+3. **Check what's already warm** first (`bcatlas_list_warm_versions`) — it's
+   free and instant, and a nearby already-warm version is sometimes good
+   enough instead of waiting on a fresh build. Otherwise **request** it and
+   **poll** until ready:
    `bcatlas_request_version(country="us", spec="28.1")` → `{status: "queued"|"in_progress"|"ready", commit_sha: "..."}`,
    then `bcatlas_version_status(country="us", commit_sha="...")` until `{state: "ready"}`.
    A brand-new (country, version) pair can take real time to build (GPU-bound,
