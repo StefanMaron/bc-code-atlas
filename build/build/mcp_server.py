@@ -38,6 +38,7 @@ from registry.resolver import ResolutionFailure, ResolvedVersion, UpstreamUnavai
 
 from . import incremental, layout, promote
 from .queue import BuildQueue
+from .warm_index import list_warm_versions
 
 _MCP_INSTRUCTIONS = (
     "Build/serve control plane for Microsoft Dynamics 365 Business Central's"
@@ -184,6 +185,26 @@ def create_build_server(
         if warm_path.is_dir():
             return {"state": "ready"}
         return {"state": queue.status((country, commit_sha))}
+
+    @mcp.tool(
+        name="bcatlas_list_warm_versions",
+        description=(
+            "List every (country, version) pair that's already warm and"
+            " instantly queryable right now -- no build wait. Check this"
+            " before calling bcatlas_request_version: a nearby already-warm"
+            " version is sometimes good enough, and costs nothing to use"
+            " versus waiting minutes for an exact-match build. Sorted"
+            " most-recently-touched first within each country."
+        ),
+    )
+    async def bcatlas_list_warm_versions(
+        country: str | None = Field(
+            default=None,
+            description="Restrict to one country/localization code, e.g. 'w1'. Omit for every country.",
+        ),
+    ) -> dict:
+        versions = await asyncio.to_thread(list_warm_versions, data_dir, mirror_dir, git_ops.UPSTREAM_URL, country)
+        return {"versions": versions}
 
     return mcp
 

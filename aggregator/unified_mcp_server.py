@@ -69,11 +69,14 @@ _AGGREGATOR_INSTRUCTIONS = (
     "\n\n"
     "0. `bcatlas_list_countries`, `bcatlas_list_versions`, `bcatlas_resolve_version`"
     " -- discover what countries/versions exist and resolve a spec (exact or"
-    " loose, e.g. 'latest 28.1') to one unambiguous build. Then"
-    " `bcatlas_request_version` to make a not-yet-built pair available"
-    " (poll `bcatlas_version_status`), and pass the returned `commit_sha`"
-    " (NOT `version_string`) as `version` to any search/graph tool below to"
-    " query that exact pair instead of the default w1-28 corpus."
+    " loose, e.g. 'latest 28.1') to one unambiguous build. Check"
+    " `bcatlas_list_warm_versions` first -- it's free and instant, and a"
+    " nearby already-warm version is sometimes good enough instead of"
+    " waiting on a fresh build. Otherwise call `bcatlas_request_version` to"
+    " make a not-yet-built pair available (poll `bcatlas_version_status`),"
+    " and pass the returned `commit_sha` (NOT `version_string`) as `version`"
+    " to any search/graph tool below to query that exact pair instead of"
+    " the default w1-28 corpus."
     "\n\n"
     "Three complementary layers, meant to be used in this order:"
     "\n"
@@ -633,6 +636,25 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
         commit_sha: str = Field(description="Exact commit sha returned by bcatlas_request_version."),
     ) -> Any:
         return await _forward(build_url, "bcatlas_version_status", {"country": country, "commit_sha": commit_sha})
+
+    @mcp.tool(
+        name="bcatlas_list_warm_versions",
+        description=(
+            "List every (country, version) pair that's already warm and"
+            " instantly queryable right now -- no build wait. Check this"
+            " before calling bcatlas_request_version: a nearby already-warm"
+            " version is sometimes good enough, and costs nothing to use"
+            " versus waiting minutes for an exact-match build. Sorted"
+            " most-recently-touched first within each country."
+        ),
+    )
+    async def list_warm_versions(
+        country: str | None = Field(
+            default=None,
+            description="Restrict to one country/localization code, e.g. 'w1'. Omit for every country.",
+        ),
+    ) -> Any:
+        return await _forward(build_url, "bcatlas_list_warm_versions", {"country": country})
 
     @mcp.tool(
         name="bcatlas_diff",

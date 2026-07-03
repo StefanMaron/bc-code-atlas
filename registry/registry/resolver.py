@@ -201,9 +201,29 @@ def _builds_for_branches(
     `country` (defensive -- a branch's commits should all belong to that
     branch's own country, but this never trusts that without checking the
     parsed commit message itself).
+
+    `is_vnext` is OR'd from two independent sources -- the commit message's
+    own `-vNext` suffix AND the branch it was actually read from
+    (`parse_branch_name`) -- rather than trusting the message alone.
+    Confirmed live (real upstream data, not theorized): commit
+    `90abe0f13b0e7e24ec90ffea8ac5a1b9aea1d434` on `w1`'s ONLY branch for
+    major 29 (`w1-29-vNext` -- there is no plain `w1-29` at all yet) has the
+    message `w1-29.0.46763.0`, with no `-vNext` suffix on the message text
+    itself. Trusting the message alone left `is_vnext=False`, and since it
+    was the ONLY build for major_minor "29.0", `_pick_best`'s
+    stable-preferred selection had nothing else to prefer over it --
+    `list_major_versions('w1')` and every resolution path routed through
+    this function (exact version string, loose major.minor, major-only)
+    surfaced it as if it were a real stable release. A branch named
+    `<country>-<major>-vNext` can ONLY ever contain preview builds by
+    definition, regardless of what any individual commit's own message
+    text happens to say -- so the branch-level flag must win whenever it
+    says vNext, even if the message-derived flag disagrees.
     """
     builds: list[ParsedVersion] = []
     for branch in branches:
+        branch_parsed = parse_branch_name(branch)
+        branch_is_vnext = branch_parsed is not None and branch_parsed[2]
         try:
             commits = git_ops.list_commits(branch, mirror_dir=mirror_dir, upstream_url=upstream_url)
         except git_ops.GitOpsError as e:
@@ -218,7 +238,7 @@ def _builds_for_branches(
                         minor=parsed.minor,
                         build_a=parsed.build_a,
                         build_b=parsed.build_b,
-                        is_vnext=parsed.is_vnext,
+                        is_vnext=parsed.is_vnext or branch_is_vnext,
                         commit_sha=sha,
                         version_string=message,
                     )
