@@ -50,6 +50,18 @@ from . import eviction, layout
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COCOINDEX_PROJECT = _REPO_ROOT / "tools" / "cocoindex-code"
 _GRAPHIFY_PROJECT = _REPO_ROOT / "tools" / "graphify-al"
+_GRAPHIFY_IGNORE_TEMPLATE = Path(__file__).with_name("graphify.ignore.template")
+
+
+def _ensure_graphify_ignore(search_dir: Path) -> None:
+    """Write this project's `.graphifyignore` into `search_dir` before a
+    graph build (see `_GRAPHIFY_IGNORE_TEMPLATE` for why -- keeps
+    document/media files out of the structural AL code graph). `search_dir`
+    is a staging/warm checkout, not a tracked location, so this can't live
+    there permanently -- write it fresh every build instead of relying on
+    it surviving a checkout/reset.
+    """
+    shutil.copyfile(_GRAPHIFY_IGNORE_TEMPLATE, search_dir / ".graphifyignore")
 
 # `chunker/`'s own AL-aware chunker plugin (T028's domain, NOT edited here --
 # read-only reuse). A brand-new `ccc init` writes cocoindex-code's GENERIC
@@ -597,6 +609,7 @@ def _run_graphify_update(
     re-extraction.
     """
     graph_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_graphify_ignore(search_dir)
     env = dict(os.environ)
     env["GRAPHIFY_OUT"] = str(graph_dir)
     cmd = [

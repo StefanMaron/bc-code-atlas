@@ -134,7 +134,7 @@ uv sync --project build
 cd data && uv run --project ../tools/cocoindex-code ccc index && cd ..
 
 # 4. Extract the structural graph
-cd tools/graphify-al && uv run python -m graphify update ../../data/w1-28-src && cd ../..
+./scripts/rebuild-default-graph.sh
 
 # 5. Start all five servers (each blocks -- run in separate terminals,
 #    or background them, e.g. with nohup/systemd/tmux)

@@ -1,0 +1,45 @@
+# Written into every graphify-al search_dir as `.graphifyignore` before a
+# graph build (see incremental.py::_ensure_graphify_ignore).
+#
+# graphify-al is a general-purpose, multi-modal knowledge-graph tool, not
+# AL-specific -- by default it extracts "document" nodes from .md/.txt/etc.
+# files right alongside real AL code nodes. Found live (2026-07-03): a real
+# tester's query seeded on a bogus node literally labeled 'Codeunit "SFTP
+# Client"', sourced from a README.md heading, not the real SFTP Client
+# codeunit's actual AL declaration -- the graph had 431 such doc-sourced
+# nodes total. This project's graph is meant to be the exact structural AL
+# code relationship graph (constitution: calls/subscribes/extends); docs
+# are already served separately via the search corpus (chunker/), so
+# mixing document-prose nodes into the same graph only pollutes seed
+# selection with non-code matches. Exclude everything graphify recognizes
+# as non-code (its own DOC_EXTENSIONS/PAPER_EXTENSIONS/IMAGE_EXTENSIONS/
+# OFFICE_EXTENSIONS/VIDEO_EXTENSIONS, graphify/detect.py) so only real
+# AL/code files (graphify's own CODE_EXTENSIONS, which includes .al)
+# become graph nodes.
+*.md
+*.mdx
+*.qmd
+*.txt
+*.rst
+*.html
+*.yaml
+*.yml
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.svg
+*.docx
+*.xlsx
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.avi
+*.m4v
+*.mp3
+*.wav
+*.m4a
+*.ogg
