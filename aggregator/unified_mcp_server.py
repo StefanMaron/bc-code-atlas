@@ -45,6 +45,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -52,6 +55,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
+
+_log = logging.getLogger("bc_code_atlas.aggregator")
 
 _AGGREGATOR_INSTRUCTIONS = (
     "A queryable window into Microsoft Dynamics 365 Business Central's AL"
@@ -136,11 +141,27 @@ async def _forward(url: str, tool: str, arguments: dict[str, Any]) -> Any:
     # FastMCP always includes for unset Optional[...] Field() params) fails
     # their input validation. Omit anything unset instead of nulling it.
     arguments = {k: v for k, v in arguments.items() if v is not None}
-    async with _backend_session(url) as session:
-        result = await session.call_tool(tool, arguments)
+    # Every call gets a short correlation id so a single request can be
+    # traced across this log's start/end lines -- without this, an incident
+    # report (e.g. a client-reported crash against the public tunnel
+    # endpoint) is untraceable after the fact since nothing here previously
+    # carried a timestamp or any way to line up which call was which.
+    request_id = uuid.uuid4().hex[:8]
+    started = time.monotonic()
+    _log.info("[%s] -> %s %s args=%r", request_id, tool, url, arguments)
+    try:
+        async with _backend_session(url) as session:
+            result = await session.call_tool(tool, arguments)
+    except Exception:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        _log.exception("[%s] <- %s %s raised after %.1fms", request_id, tool, url, elapsed_ms)
+        raise
+    elapsed_ms = (time.monotonic() - started) * 1000
     text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
     if result.isError:
+        _log.warning("[%s] <- %s %s backend error after %.1fms: %s", request_id, tool, url, elapsed_ms, text[:300])
         raise RuntimeError(text or f"{tool} failed with no error detail")
+    _log.info("[%s] <- %s %s ok after %.1fms", request_id, tool, url, elapsed_ms)
     if result.structuredContent is not None:
         return result.structuredContent
     return text
@@ -785,6 +806,21 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
 
 def main() -> None:
     import os
+
+    # Nothing in this process previously logged a timestamp, making a
+    # reported incident (e.g. a client error against the public tunnel
+    # endpoint) impossible to correlate with what this server actually did
+    # at that moment. This applies to our own `_log` calls in `_forward`,
+    # httpx's per-request log lines, and uvicorn's internal error/traceback
+    # logger ("uvicorn.error") -- uvicorn's plain startup/access lines keep
+    # their own untimestamped handlers regardless (uvicorn.config sets
+    # propagate=False on those two loggers specifically), so those are
+    # unaffected here.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
