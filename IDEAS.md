@@ -198,6 +198,41 @@ it's spec-ready:
   worth confirming this is worth the schema/rebuild cost before spec'ing
   it, per the "measure, don't assume" principle.
 
+## Idea: zero-downtime restart for the aggregator and its backends
+
+Captured 2026-07-03, from a live incident with a real external tester
+through the Cloudflare Tunnel deployment (see `CLOUDFLARE_TUNNEL.md`'s
+"Known limitation" section for the full writeup).
+
+Every one of `scripts/start-*.sh` (search, graph, registry, build,
+aggregator) is a plain kill-and-relaunch -- there's no graceful
+drain/handoff. Confirmed live: restarting the aggregator process at
+`10:07:13 UTC` lined up second-for-second with a burst of `unexpected EOF`
+errors in the Cloudflare Tunnel container's log against
+`originService=http://localhost:8800`, and the real tester connected at
+that moment saw a client-side crash and had to manually restart their own
+MCP client to recover. The tunnel container itself self-healed (dialed a
+fresh connection for the next request with zero action needed), but
+nothing on our side protected whoever was mid-request at the exact
+instant of the restart.
+
+Possible directions, not decided:
+- Graceful SIGTERM handling in each server so an in-flight request
+  finishes before the process actually exits, instead of the connection
+  just dying.
+- A blue-green swap: bring up the new process on a temporary port, health
+  check it, then only kill the old one and rebind the real port once the
+  new one is confirmed healthy -- avoids even a few-hundred-ms gap where
+  the port has no listener at all.
+- Simplest non-engineering mitigation: just avoid restarting during a
+  known-active testing window -- doesn't fix the underlying gap but costs
+  nothing to do today.
+
+Worth weighing against how often these processes actually get restarted
+in practice (this session restarted the aggregator/search/graph several
+times while iterating on bug fixes -- restarts are not rare during active
+development, even if they'll likely be rarer once things stabilize).
+
 ## Idea: automate default-corpus promotion when upstream publishes a new build
 
 Captured 2026-07-03, from a live incident: checking whether the latest w1

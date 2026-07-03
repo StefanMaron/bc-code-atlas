@@ -132,6 +132,40 @@ involved.
 - The same request with `-H "CF-Access-Client-Id: ..." -H "CF-Access-Client-Secret: ..."` should return `200` with a real MCP `initialize` response.
 - A wrong/garbage secret should still `403`.
 
+## Known limitation: restarting a backend breaks whoever is connected at that instant
+
+Restarting the aggregator, or any backend it's actively forwarding a call
+to (search/graph/registry/build), kills the OS-level connection(s)
+cloudflared has open to it. Any request genuinely in-flight at that exact
+moment gets an abrupt, truncated response instead of a clean error --
+confirmed live (not theorized) on 2026-07-03: an aggregator restart at the
+exact process-start timestamp `10:07:13 UTC` lined up second-for-second
+with a burst of `unexpected EOF` errors in `docker logs bc-code-atlas-tunnel`
+against `originService=http://localhost:8800`, and a real external tester
+saw a client-side crash (`Cannot read properties of undefined (reading
+'invoke')`) at that moment and had to restart their own MCP client to
+recover -- their client's session/connection to the aggregator didn't
+self-heal on its own, even though the tunnel container did.
+
+What does and doesn't need restarting after this happens:
+- **The `bc-code-atlas-tunnel` container itself never needs restarting.**
+  Its outbound connection pool to `localhost:8800` just dials a fresh
+  connection on the next request -- confirmed by real external traffic
+  succeeding immediately after a backend restart with zero action taken
+  on the tunnel container.
+- **The affected MCP client does need to reconnect** (restart the client,
+  or whatever forces it to re-`initialize` a fresh session) -- its
+  in-flight request/session was the thing that actually broke.
+
+There's currently no zero-downtime restart path for any of these
+processes (search, graph, registry, build, aggregator) -- a restart is a
+plain kill-and-relaunch (see `scripts/start-*.sh`), so this is a real,
+open operational gap, not just a one-off fluke. Logged as a possible
+future fix in `IDEAS.md`. Until/unless that exists, avoid restarting
+during a window when you know a tester is actively connected, and expect
+that anyone who is connected at the moment of a restart will need to
+reconnect their client afterward.
+
 ## Optional: extra defense-in-depth
 
 `graphify-al`'s HTTP transport supports its own bearer-token gate
