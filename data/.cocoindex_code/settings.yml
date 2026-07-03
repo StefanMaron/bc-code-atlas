@@ -4,6 +4,9 @@ include_patterns:
 exclude_patterns:
   - "**/.git/**"
   - "**/graphify-out/**"
+  - "warm/**"
+  - "staging/**"
+  - ".upstream-mirror/**"
 language_overrides:
   - ext: al
     lang: al
