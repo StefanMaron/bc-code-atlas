@@ -22,6 +22,7 @@ rejected via `DiffScopeError` -- an unscoped diff is never produced
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,12 +105,22 @@ _FILENAME_TYPE_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 
+_NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
 def _normalize_object_name(name: str) -> str:
-    """Real on-disk filenames strip spaces from the object name (confirmed
-    live: page "Report Inbox" -> file "ReportInbox.Page.al") and vary in
-    case -- normalize both sides of the comparison the same way.
+    """Real on-disk filenames strip EVERY non-alphanumeric character from
+    the object name, not just spaces -- confirmed live against the real
+    w1-28 corpus: page "Report Inbox" -> "ReportInbox.Page.al" (space),
+    codeunit "Sales-Post" -> "SalesPost.Codeunit.al" (hyphen), table
+    "G/L Entry" -> "GLEntry.Table.al" (slash), table "Sales & Receivables
+    Setup" -> "SalesReceivablesSetup.Table.al" (ampersand). A space-only
+    strip left every one of these except the first failing to match its
+    real file (confirmed live: `object_type: codeunit, object_name:
+    "Sales-Post"` returned `from_found: false, to_found: false` against a
+    real commit pair despite the object genuinely existing there).
     """
-    return name.replace(" ", "").strip().lower()
+    return _NON_ALNUM_RE.sub("", name).strip().lower()
 
 
 def locate_symbol_file(

@@ -61,6 +61,22 @@ def test_locate_symbol_file_finds_real_object(_mirror):
     assert path == _TOUCHED_PATH
 
 
+def test_locate_symbol_file_strips_non_alnum_punctuation_like_the_real_filename(_mirror):
+    # Real bug found live testing this session: a space-only normalization
+    # matched "Report Inbox" (this module's main fixture) but missed every
+    # object whose real on-disk filename drops OTHER punctuation too --
+    # codeunit 80 "Sales-Post" -> "SalesPost.Codeunit.al" (hyphen), table
+    # "G/L Entry" -> "GLEntry.Table.al" (slash).
+    assert (
+        diff.locate_symbol_file(_TO_SHA, "codeunit", "Sales-Post", mirror_dir=_mirror)
+        == "Base Application/Sales/Posting/SalesPost.Codeunit.al"
+    )
+    assert (
+        diff.locate_symbol_file(_TO_SHA, "table", "G/L Entry", mirror_dir=_mirror)
+        == "Base Application/Finance/GeneralLedger/Ledger/GLEntry.Table.al"
+    )
+
+
 def test_locate_symbol_file_returns_none_for_nonexistent_object(_mirror):
     path = diff.locate_symbol_file(
         _TO_SHA, "codeunit", "This Codeunit Definitely Does Not Exist 12345", mirror_dir=_mirror
