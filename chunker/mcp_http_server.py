@@ -534,7 +534,7 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                                 project_root=target_root,
                                 query=query,
                                 languages=languages,
-                                paths=paths,
+                                paths=effective_paths,
                                 limit=fl,
                                 offset=offset,
                             ),
