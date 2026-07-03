@@ -31,8 +31,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
+import signal
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from cocoindex_code.server import CodeChunkResult, SearchResultModel
 from mcp.server.fastmcp import FastMCP
@@ -79,6 +85,171 @@ _MAX_FETCH_LIMIT = 100
 
 def _is_test_path(file_path: str) -> bool:
     return any(_TEST_PATH_SEGMENT.search(seg) for seg in file_path.split("/")[:-1])
+
+
+# --- daemon stall recovery ---------------------------------------------
+#
+# `build/build/incremental.py`'s `_run_ccc_index` already documents (from
+# 4+ independently reproduced occurrences, verified live, never theorized
+# -- constitution Principle V) a real upstream `ccc index` stall: after
+# minutes of healthy progress the daemon goes permanently idle (or, also
+# observed live against THIS server's own shared daemon, spins CPU with
+# zero GPU utilization) and never recovers on its own -- root cause is in
+# cocoindex's Rust/async internals, out of reach here (Principle VI). The
+# build side already has a kill-and-resume watchdog for it; this server's
+# always-on shared daemon (serving `bcatlas_search` for every tester) had
+# none, so a stall here just hangs every search forever with no recovery.
+# This mirrors that same proven workaround at this call site instead of
+# patching the vendored `cocoindex_code` package (same Principle VI
+# rationale as the build side), duplicated rather than cross-imported
+# because this project deliberately has no dependency on `build/` (see the
+# module docstring's multi-tenant routing note above).
+_STALL_TIMEOUT_S = 90.0
+_STALL_POLL_INTERVAL_S = 5.0
+_MAX_STALL_RETRIES = 3
+
+_T = TypeVar("_T")
+
+
+def _index_state_fingerprint(project_root: str) -> tuple[int, float]:
+    """(total_bytes, newest_mtime) across a project's on-disk cocoindex
+    state -- real forward progress independent of the daemon's own
+    in-memory progress counters, which can plateau mid-batch for a while
+    even when healthy (observed live: flat counters for 10s+ with the
+    daemon still genuinely busy). `lock.mdb`'s mtime updates on every
+    read, not just writes, so it's excluded exactly as
+    `build/build/incremental.py`'s identically-named helper does.
+    """
+    total = 0
+    newest = 0.0
+    root = Path(project_root) / ".cocoindex_code"
+    if not root.is_dir():
+        return (0, 0.0)
+    for p in root.rglob("*"):
+        if not p.is_file() or p.name == "lock.mdb":
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        total += st.st_size
+        newest = max(newest, st.st_mtime)
+    return (total, newest)
+
+
+def _kill_shared_daemon_hard() -> None:
+    """SIGTERM -> SIGKILL the shared `ccc` daemon by its own pidfile.
+
+    Deliberately NOT `cocoindex_code.client.stop_daemon()`: its graceful
+    path does a blocking socket `recv_bytes()` against the daemon, which
+    against the exact stalled-daemon state this exists to clean up could
+    itself hang (same reasoning, and same conclusion reached independently
+    by `build/build/incremental.py`'s `_kill_daemon_by_pidfile`). Killing
+    by PID cannot hang. `os.killpg` also reaps the daemon's spawned
+    GPU-worker child (the daemon is its own session leader --
+    `client.start_daemon`'s `start_new_session=True`).
+
+    Also resets the client module's sticky `_daemon_ensured` flag: once
+    that module has successfully connected once in this server's
+    lifetime, its own auto-start logic treats a vanished daemon as a fatal
+    anomaly to surface rather than something to silently restart (see
+    `cocoindex_code.client._connect_and_handshake`) -- without this reset,
+    the very next call after killing the daemon would just fail instead of
+    starting a fresh one.
+    """
+    from cocoindex_code import client as _daemon_client
+    from cocoindex_code._daemon_paths import daemon_pid_path
+
+    pid_file = daemon_pid_path()
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None:
+        for sig, grace_s in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+            try:
+                os.killpg(pid, sig)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+            deadline = time.monotonic() + grace_s
+            gone = False
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    gone = True
+                    break
+                time.sleep(0.2)
+            if gone:
+                break
+    _daemon_client._daemon_ensured = False
+
+
+def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
+    """Run a blocking `cocoindex_code.client` call (`index`/`search`) to
+    completion, recovering from the documented daemon stall above instead
+    of hanging forever.
+
+    `fn` runs on a background thread (there is no way to cancel a thread
+    blocked in `Connection.recv_bytes()`) while this polls the on-disk
+    index fingerprint. No change for `_STALL_TIMEOUT_S` means a genuine
+    stall -- kill the daemon (which unblocks the stuck thread with a
+    `RuntimeError`, since `index()`/`search()` both turn `EOFError` on the
+    now-closed socket into one) and retry with a fresh daemon. Resuming is
+    cheap and lossless: verified live (this session) that `ccc index`
+    picks back up from its on-disk LMDB/SQLite state within ~40s of a
+    kill, re-embedding nothing already completed.
+    """
+    for attempt in range(1, _MAX_STALL_RETRIES + 1):
+        outcome: dict[str, object] = {}
+
+        def _target() -> None:
+            try:
+                outcome["result"] = fn()
+            except Exception as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+
+        last_fp = _index_state_fingerprint(project_root)
+        last_progress = time.monotonic()
+        while thread.is_alive():
+            thread.join(timeout=_STALL_POLL_INTERVAL_S)
+            if not thread.is_alive():
+                break
+            fp = _index_state_fingerprint(project_root)
+            now = time.monotonic()
+            if fp != last_fp:
+                last_fp = fp
+                last_progress = now
+            elif now - last_progress >= _STALL_TIMEOUT_S:
+                break  # stalled -- fall through to kill+retry below
+
+        if not thread.is_alive():
+            if "error" in outcome:
+                raise outcome["error"]  # type: ignore[misc]
+            return outcome["result"]  # type: ignore[return-value]
+
+        # Stalled: the background thread is still blocked inside the
+        # daemon call (and stays abandoned -- daemon=True -- there is no
+        # way to cancel it; killing the daemon below unblocks it shortly
+        # after with an error, which is harmless since nothing reads
+        # `outcome` for this attempt anymore).
+        _kill_shared_daemon_hard()
+        if attempt == _MAX_STALL_RETRIES:
+            raise RuntimeError(
+                f"cocoindex daemon stalled {attempt} time(s) in a row on "
+                f"{project_root!r} with no on-disk progress for "
+                f"{_STALL_TIMEOUT_S:.0f}s each time -- giving up. See "
+                "~/.cocoindex_code/daemon.log."
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # --- multi-tenant routing (T028, specs/001-multi-version-serving) ---------
@@ -155,6 +326,19 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
             " include_tests=true to search them too."
             " Start with a small limit (e.g., 5);"
             " if most results look relevant, use offset to paginate for more."
+            "\n\n"
+            " This is embedding/meaning-based, not a literal grep -- it can"
+            " miss or mis-rank an exact string, and results are chunked so"
+            " you may not get the precise line you need. If you already know"
+            " the exact object (table/page/codeunit/...) by name -- e.g. you"
+            " just need one specific field, procedure, or line inside a table"
+            " you can already name -- don't search for it: use"
+            " bcatlas_get_object_source/bcatlas_get_signature/"
+            " bcatlas_get_procedure_body (graph server tools) with that exact"
+            " name instead and read the line you need out of the real"
+            " source they return. Reserve this search tool for when you"
+            " don't yet know which object/procedure has what you're looking"
+            " for."
         ),
     )
     async def search(
@@ -262,18 +446,26 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 refresh_index = False
 
             if refresh_index:
-                await loop.run_in_executor(None, lambda: _client.index(target_root))
+                await loop.run_in_executor(
+                    None,
+                    lambda: _run_with_stall_recovery(
+                        lambda: _client.index(target_root), target_root
+                    ),
+                )
 
             if include_tests:
                 resp = await loop.run_in_executor(
                     None,
-                    lambda: _client.search(
-                        project_root=target_root,
-                        query=query,
-                        languages=languages,
-                        paths=paths,
-                        limit=limit,
-                        offset=offset,
+                    lambda: _run_with_stall_recovery(
+                        lambda: _client.search(
+                            project_root=target_root,
+                            query=query,
+                            languages=languages,
+                            paths=paths,
+                            limit=limit,
+                            offset=offset,
+                        ),
+                        target_root,
                     ),
                 )
                 kept = resp.results
@@ -289,13 +481,16 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 for _ in range(_MAX_OVERFETCH_ROUNDS):
                     resp = await loop.run_in_executor(
                         None,
-                        lambda fl=fetch_limit: _client.search(
-                            project_root=target_root,
-                            query=query,
-                            languages=languages,
-                            paths=paths,
-                            limit=fl,
-                            offset=offset,
+                        lambda fl=fetch_limit: _run_with_stall_recovery(
+                            lambda: _client.search(
+                                project_root=target_root,
+                                query=query,
+                                languages=languages,
+                                paths=paths,
+                                limit=fl,
+                                offset=offset,
+                            ),
+                            target_root,
                         ),
                     )
                     message = resp.message

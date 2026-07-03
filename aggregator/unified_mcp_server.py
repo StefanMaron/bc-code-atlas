@@ -83,7 +83,9 @@ _AGGREGATOR_INSTRUCTIONS = (
     "1. `bcatlas_search` -- semantic search by meaning. Use this first to find a"
     " starting point: real implementations, base-application objects,"
     " call-site examples, or doc pages, even when you don't know the exact"
-    " object/procedure/event name."
+    " object/procedure/event name. If you already know the exact"
+    " object/procedure name, skip straight to step 3 instead -- it's exact"
+    " and cheaper than searching for something you can already name."
     "\n"
     "2. `bcatlas_query_graph`, `bcatlas_get_node`, `bcatlas_get_neighbors`, `bcatlas_get_community`,"
     " `bcatlas_god_nodes`, `bcatlas_graph_stats`, `bcatlas_shortest_path` -- the exact structural"
@@ -161,6 +163,22 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
             " by default -- pass include_tests=true to search them too."
             " Start with a small limit (e.g. 5); if most results look"
             " relevant, use offset to paginate for more."
+            "\n\n"
+            "This is embedding/meaning-based, not a literal grep -- it can"
+            " miss or mis-rank an exact string, and results are chunked so"
+            " you may not get the precise line you need. If you already"
+            " know the exact object (table/page/codeunit/...) by name --"
+            " e.g. you just need one specific field, procedure, or line"
+            " inside a table you can already name -- don't search for it:"
+            " call `bcatlas_get_object_source` with that object's name"
+            " directly and read the line you need out of the real source it"
+            " returns (individual table fields aren't their own graph"
+            " nodes, so there's no narrower lookup than the whole object)."
+            " Use `bcatlas_get_signature`/`bcatlas_get_procedure_body`"
+            " instead when what you know the name of is a specific"
+            " procedure/trigger, not the whole object. Reserve this search"
+            " tool for when you don't yet know which object/procedure has"
+            " what you're looking for."
         ),
     )
     async def search(
@@ -192,8 +210,13 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
             description=(
                 "Country code (e.g. 'w1', 'us') to query a specific, already-built"
                 " (country, version) pair instead of the default w1-28 corpus."
-                " Must be paired with `version`. Resolve both first via"
-                " bcatlas_resolve_version/bcatlas_request_version."
+                " Must be paired with `version`. `bcatlas_resolve_version` alone"
+                " only identifies the commit_sha -- it does NOT build or warm"
+                " anything. This pair is only queryable once"
+                " `bcatlas_request_version` returns status=ready (or"
+                " `bcatlas_version_status` reports state=ready after polling)."
+                " Passing an identified-but-unbuilt commit_sha here fails, not"
+                " falls back to the default corpus."
             ),
         ),
         version: str | None = Field(
