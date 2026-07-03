@@ -212,11 +212,21 @@ def list_commits(
     rationale as `fetch_commit`'s per-commit refs: keeps the history
     reachable/safe from GC and re-fetchable without relying on ephemeral
     `FETCH_HEAD`.
+
+    Force-updates that ref (`+branch:ref`, not a plain fast-forward-only
+    refspec) -- confirmed live against the real upstream repo: `w1-27` and
+    `w1-28` have both had their history rewritten upstream (a force-push,
+    presumably a periodic mirror rebuild), which made a plain fetch reject
+    with "non-fast-forward" and left every resolution path for that branch
+    permanently broken (`upstream_unavailable`) since the local ref could
+    never move again. The branch pointer here is just a cache of upstream
+    truth, not something we own -- always follow upstream, never protect a
+    local ref against it moving.
     """
     _ensure_mirror(mirror_dir, upstream_url)
     ref = _branch_ref(branch)
     _run_git(
-        ["fetch", "origin", f"{branch}:{ref}", "--filter=blob:none"],
+        ["fetch", "origin", f"+{branch}:{ref}", "--filter=blob:none"],
         cwd=mirror_dir,
     )
     # \x1f (unit separator) as the sha/message delimiter -- commit messages
