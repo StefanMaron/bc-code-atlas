@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from build.queue import BuildQueue
 
 
@@ -144,6 +146,122 @@ def test_bounded_concurrency_never_exceeds_max() -> None:
         assert peak <= max_concurrent, f"observed {peak} concurrent builds, budget was {max_concurrent}"
         assert peak >= 1
         assert {r.result for r in records} == set(range(5))
+
+    asyncio.run(scenario())
+
+
+def test_average_duration_tracks_successful_builds_only() -> None:
+    async def scenario() -> None:
+        queue = BuildQueue(max_concurrent=1)
+
+        async def ok_build_fn() -> str:
+            await asyncio.sleep(0.05)
+            return "ok"
+
+        async def flaky_build_fn() -> str:
+            raise RuntimeError("boom")
+
+        assert queue.average_duration() is None
+        assert queue.duration_sample_count == 0
+
+        r1 = await queue.request_build(("w1", "a"), ok_build_fn)
+        await r1.task
+
+        try:
+            r2 = await queue.request_build(("w1", "b"), flaky_build_fn)
+            await r2.task
+        except RuntimeError:
+            pass
+
+        # The failed build must not pollute the duration average.
+        assert queue.duration_sample_count == 1
+        avg = queue.average_duration()
+        assert avg is not None and avg >= 0.05
+
+    asyncio.run(scenario())
+
+
+def test_builds_ahead_counts_active_records_requested_earlier() -> None:
+    async def scenario() -> None:
+        queue = BuildQueue(max_concurrent=1)
+        release = asyncio.Event()
+
+        async def slow_build_fn() -> str:
+            await release.wait()
+            return "done"
+
+        running = await queue.request_build(("w1", "running"), slow_build_fn)
+        await asyncio.sleep(0)  # let it actually start
+        assert queue.builds_ahead(("w1", "running")) == 0
+
+        second = await queue.request_build(("w1", "second"), slow_build_fn)
+        third = await queue.request_build(("w1", "third"), slow_build_fn)
+        assert queue.builds_ahead(("w1", "second")) == 1
+        assert queue.builds_ahead(("w1", "third")) == 2
+
+        # Terminal/unknown keys have no position at all.
+        assert queue.builds_ahead(("w1", "never-requested")) is None
+
+        release.set()
+        await asyncio.gather(running.task, second.task, third.task)
+
+    asyncio.run(scenario())
+
+
+def test_estimate_seconds_remaining_none_without_history() -> None:
+    async def scenario() -> None:
+        queue = BuildQueue(max_concurrent=1)
+        release = asyncio.Event()
+
+        async def slow_build_fn() -> str:
+            await release.wait()
+            return "done"
+
+        record = await queue.request_build(("w1", "first-ever"), slow_build_fn)
+        await asyncio.sleep(0)
+        assert queue.estimate_seconds_remaining(("w1", "first-ever")) is None
+
+        release.set()
+        await record.task
+
+    asyncio.run(scenario())
+
+
+def test_estimate_seconds_remaining_uses_average_duration_once_available() -> None:
+    async def scenario() -> None:
+        queue = BuildQueue(max_concurrent=1)
+
+        async def fast_build_fn() -> str:
+            await asyncio.sleep(0.05)
+            return "ok"
+
+        warmup = await queue.request_build(("w1", "warmup"), fast_build_fn)
+        await warmup.task
+        avg = queue.average_duration()
+        assert avg is not None
+
+        release = asyncio.Event()
+
+        async def slow_build_fn() -> str:
+            await release.wait()
+            return "done"
+
+        running = await queue.request_build(("w1", "running"), slow_build_fn)
+        queued = await queue.request_build(("w1", "queued"), slow_build_fn)
+        await asyncio.sleep(0)
+
+        # Nothing has run for the queued one yet, so its estimate should be
+        # roughly "the running build's remaining time" + "one more avg" --
+        # strictly greater than the in_progress build's own estimate.
+        running_eta = queue.estimate_seconds_remaining(("w1", "running"))
+        queued_eta = queue.estimate_seconds_remaining(("w1", "queued"))
+        assert running_eta is not None and queued_eta is not None
+        assert running_eta == pytest.approx(avg, abs=0.05)
+        assert queued_eta > running_eta
+
+        release.set()
+        await running.task
+        await queued.task
 
     asyncio.run(scenario())
 

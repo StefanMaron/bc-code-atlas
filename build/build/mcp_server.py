@@ -174,7 +174,12 @@ def create_build_server(
             " a commit never requested, 'queued'/'in_progress' while"
             " building, 'ready' once search/graph tools can be used against"
             " it, or 'failed' if the build errored (request it again to"
-            " retry -- a failed build is never silently resumed)."
+            " retry -- a failed build is never silently resumed). While"
+            " queued/in_progress, also includes builds_ahead (0 means it's"
+            " the one actually running now) and, once at least one build"
+            " has completed this session, a rough eta_seconds -- both are"
+            " coarse estimates (cold vs incremental builds differ by roughly"
+            " an order of magnitude), not a precise countdown."
         ),
     )
     async def bcatlas_version_status(
@@ -184,7 +189,26 @@ def create_build_server(
         warm_path = layout.warm_root(country, commit_sha, data_dir)
         if warm_path.is_dir():
             return {"state": "ready"}
-        return {"state": queue.status((country, commit_sha))}
+
+        key = (country, commit_sha)
+        state = queue.status(key)
+        response: dict = {"state": state}
+        if state not in ("queued", "in_progress"):
+            return response
+
+        response["builds_ahead"] = queue.builds_ahead(key)
+        eta_seconds = queue.estimate_seconds_remaining(key)
+        if eta_seconds is None:
+            response["eta_note"] = "No completed build yet this session to estimate from."
+        else:
+            response["eta_seconds"] = round(eta_seconds)
+            response["eta_note"] = (
+                f"Rough estimate from this session's last"
+                f" {queue.duration_sample_count} completed build(s) --"
+                " cold vs incremental builds vary widely, treat as"
+                " order-of-magnitude, not precise."
+            )
+        return response
 
     @mcp.tool(
         name="bcatlas_list_warm_versions",

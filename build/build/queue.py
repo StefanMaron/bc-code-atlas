@@ -49,6 +49,20 @@ class BuildRecord:
     # including the one that started it -- purely observability, not used
     # for any control-flow decision.
     attach_count: int = field(default=1)
+    # Set when the record leaves "queued" (started_at) and when it leaves
+    # "in_progress" successfully (finished_at) -- feeds BuildQueue's ETA
+    # estimation. Both None until then; finished_at stays None on failure
+    # (a failed build's duration isn't a representative sample of real work).
+    started_at: float | None = None
+    finished_at: float | None = None
+
+
+# How many of the most recent successfully-completed builds' durations to
+# keep for ETA estimation -- a small rolling window (not a running average
+# over the whole process lifetime) so the estimate tracks recent conditions
+# (e.g. a run of cheap incremental builds vs. one cold one) rather than
+# being dragged by history.
+_DURATION_HISTORY_SIZE = 10
 
 
 class BuildQueue:
@@ -69,6 +83,9 @@ class BuildQueue:
         self.max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._records: dict[Hashable, BuildRecord] = {}
+        # Most recent successful build durations (seconds), newest last,
+        # capped at _DURATION_HISTORY_SIZE -- see average_duration().
+        self._recent_durations: list[float] = []
         # Guards read-modify-write of self._records so two concurrent
         # request_build calls for the same brand-new key can't both decide
         # "not present, I'll create it" and race each other into starting
@@ -103,14 +120,18 @@ class BuildQueue:
     async def _run(self, record: BuildRecord, build_fn: Callable[[], Awaitable[Any]]) -> Any:
         async with self._semaphore:
             record.state = "in_progress"
+            record.started_at = time.time()
             try:
                 result = await build_fn()
             except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
                 record.state = "failed"
                 record.error = str(exc)
                 raise
+            record.finished_at = time.time()
             record.state = "ready"
             record.result = result
+            self._recent_durations.append(record.finished_at - record.started_at)
+            del self._recent_durations[:-_DURATION_HISTORY_SIZE]
             return result
 
     def status(self, key: Hashable) -> BuildState | str:
@@ -128,3 +149,70 @@ class BuildQueue:
         callers to protect an in-flight build's base sibling from reclaim.
         """
         return {k for k, r in self._records.items() if r.state in ("queued", "in_progress")}
+
+    def average_duration(self) -> float | None:
+        """Mean of the last `_DURATION_HISTORY_SIZE` successful build
+        durations (seconds), or `None` if none have completed yet this
+        process's lifetime -- callers must handle `None` (no ETA to give,
+        not a zero-second one).
+        """
+        if not self._recent_durations:
+            return None
+        return sum(self._recent_durations) / len(self._recent_durations)
+
+    @property
+    def duration_sample_count(self) -> int:
+        return len(self._recent_durations)
+
+    def builds_ahead(self, key: Hashable) -> int | None:
+        """How many other `queued`/`in_progress` records were requested
+        before `key`'s -- `0` for the record currently running (nothing
+        left to wait on), `None` if `key` is unknown or already terminal
+        (`ready`/`failed`) -- position doesn't apply to those.
+        """
+        record = self._records.get(key)
+        if record is None or record.state not in ("queued", "in_progress"):
+            return None
+        return sum(
+            1
+            for r in self._records.values()
+            if r.state in ("queued", "in_progress") and r.requested_at < record.requested_at
+        )
+
+    def estimate_seconds_remaining(self, key: Hashable) -> float | None:
+        """Rough ETA (seconds from now) for `key` to reach `ready`, via a
+        simple list-scheduling simulation over `max_concurrent` slots using
+        `average_duration()` as every build's expected length. `None` if
+        `key` is unknown/terminal, or no historical duration exists yet to
+        estimate from -- genuinely coarse (real builds vary cold-vs-
+        incremental by roughly an order of magnitude, see IDEAS.md), meant
+        as a rough "is this minutes or an hour" signal, not a precise ETA.
+        """
+        record = self._records.get(key)
+        if record is None or record.state not in ("queued", "in_progress"):
+            return None
+        avg = self.average_duration()
+        if avg is None:
+            return None
+
+        now = time.time()
+        if record.state == "in_progress":
+            return max(avg - (now - record.started_at), 0.0)
+
+        in_progress = sorted(
+            (r for r in self._records.values() if r.state == "in_progress"),
+            key=lambda r: r.started_at,
+        )
+        slot_free_at = [max(avg - (now - r.started_at), 0.0) for r in in_progress]
+        slot_free_at += [0.0] * max(0, self.max_concurrent - len(slot_free_at))
+
+        queued = sorted(
+            (r for r in self._records.values() if r.state == "queued"),
+            key=lambda r: r.requested_at,
+        )
+        for r in queued:
+            slot = min(range(len(slot_free_at)), key=lambda i: slot_free_at[i])
+            slot_free_at[slot] += avg
+            if r.key == key:
+                return slot_free_at[slot]
+        return None  # unreachable: `record` is in `queued` by the state check above
