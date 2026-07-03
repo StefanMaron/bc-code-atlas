@@ -298,11 +298,50 @@ def _invalid_warm_project_reason(path: Path) -> str | None:
     return None
 
 
+# Submodule directories that only exist under the *default* multi-corpus
+# project_root (`data/`, holding AL source + both docs corpora side by
+# side). A routed per-(country, version) project_root is a raw checkout
+# with no such prefix -- see `_corpus_path_prefixes` below.
+_DEFAULT_CORPUS_PATH_PREFIX_CANDIDATES = ("w1-28-src", "docs", "docs-devitpro")
+
+
+def _resolve_corpus_path_prefixes(project_root: str) -> tuple[str, ...]:
+    """Which of the default corpus's known submodule subdirectories
+    actually exist under `project_root`, computed once at server startup
+    from the real directory rather than assumed.
+    """
+    root = Path(project_root)
+    return tuple(p for p in _DEFAULT_CORPUS_PATH_PREFIX_CANDIDATES if (root / p).is_dir())
+
+
+def _expand_paths_for_corpus_prefixes(paths: list[str], prefixes: tuple[str, ...]) -> list[str]:
+    """Also try each glob under the corpus's submodule prefixes.
+
+    `bcatlas_search`'s `paths` filter is matched via SQLite GLOB against
+    the exact indexed relative path (cocoindex_code -- vendored, not
+    modified here, constitution Principle VI). On the default corpus every
+    indexed path carries a submodule prefix (e.g.
+    `w1-28-src/Base Application/Sales/...`), so a caller-supplied glob like
+    `['Base Application/Sales/*']` -- the natural, prefix-agnostic form,
+    and the one the tool's own docstring example used to show -- silently
+    matched zero rows instead of erroring. Expanding here to also try the
+    prefixed form keeps both spellings working without touching the
+    vendored query engine.
+    """
+    expanded = list(paths)
+    for p in paths:
+        if p.startswith(prefixes):
+            continue
+        expanded.extend(f"{prefix}/{p}" for prefix in prefixes)
+    return expanded
+
+
 def create_filtered_mcp_server(project_root: str) -> FastMCP:
     """Like cocoindex_code.server.create_mcp_server, plus test-path filtering."""
     from cocoindex_code import client as _client
 
     mcp = FastMCP("cocoindex-code", instructions=_MCP_INSTRUCTIONS)
+    _corpus_path_prefixes = _resolve_corpus_path_prefixes(project_root)
 
     @mcp.tool(
         name="bcatlas_search",
@@ -378,7 +417,12 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
             default=None,
             description=(
                 "Filter by file path pattern(s) using GLOB wildcards (* and ?)."
-                " Example: ['src/utils/*', '*.py']"
+                " Example: ['Base Application/Sales/*']. On the default"
+                " corpus, both that prefix-agnostic form and the fully"
+                " qualified form (e.g."
+                " ['w1-28-src/Base Application/Sales/*']) are matched --"
+                " you don't need to know the internal w1-28-src/docs/"
+                " docs-devitpro submodule layout."
             ),
         ),
         include_tests: bool = Field(
@@ -445,6 +489,10 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 target_root = str(warm_dir)
                 refresh_index = False
 
+            effective_paths = paths
+            if paths and target_root == project_root and _corpus_path_prefixes:
+                effective_paths = _expand_paths_for_corpus_prefixes(paths, _corpus_path_prefixes)
+
             if refresh_index:
                 await loop.run_in_executor(
                     None,
@@ -461,7 +509,7 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                             project_root=target_root,
                             query=query,
                             languages=languages,
-                            paths=paths,
+                            paths=effective_paths,
                             limit=limit,
                             offset=offset,
                         ),

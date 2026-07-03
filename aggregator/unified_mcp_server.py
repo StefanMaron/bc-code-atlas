@@ -199,7 +199,13 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
         languages: list[str] | None = Field(default=None, description="Filter by language(s), e.g. ['al']"),
         paths: list[str] | None = Field(
             default=None,
-            description="Filter by file path glob(s), e.g. ['Base Application/Sales/*']",
+            description=(
+                "Filter by file path glob(s), e.g. ['Base Application/Sales/*']."
+                " On the default corpus, both that prefix-agnostic form and"
+                " the fully qualified form (e.g."
+                " ['w1-28-src/Base Application/Sales/*']) are matched --"
+                " you don't need to know the internal submodule layout."
+            ),
         ),
         include_tests: bool = Field(
             default=False,
