@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # aggregator/ and chunker/ have no test suite yet -- not included
+        # here because a "passing" CI job with zero tests collected would
+        # be misleading, not because they're exempt from ever needing one.
+        project: [registry, build, tools/graphify-al]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync ${{ matrix.project }}
+        run: uv sync --project ${{ matrix.project }}
+
+      - name: Install tree-sitter-al (graphify-al's AL support, not a hard pyproject dep)
+        if: matrix.project == 'tools/graphify-al'
+        run: uv pip install --project ${{ matrix.project }} "tree-sitter-al>=3.0.1"
+
+      - name: Run tests
+        run: uv run --project ${{ matrix.project }} pytest ${{ matrix.project }}/tests -q
+
+  smoke-import:
+    name: smoke-import (aggregator, chunker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      # No test suite exists for these two yet (tracked as a gap, not
+      # silently accepted) -- this at least catches an import-time/syntax
+      # break before it reaches master, better than nothing until real
+      # tests land.
+      - name: aggregator imports cleanly
+        run: |
+          uv sync --project aggregator
+          uv run --project aggregator python -c "import unified_mcp_server" 2>&1 || \
+          uv run --project aggregator python -c "import sys; sys.path.insert(0, 'aggregator'); import unified_mcp_server"
+
+      - name: chunker imports cleanly
+        run: |
+          uv sync --project chunker
+          uv pip install --project chunker "tree-sitter-al>=3.0.1"
+          uv run --project chunker python -c "import sys; sys.path.insert(0, 'chunker'); import al_chunker"
