@@ -48,16 +48,28 @@ jobs:
             uv sync --project ${{ matrix.project }}
           fi
 
+      # registry/tests is *entirely* network-marked (test_resolver.py,
+      # test_git_ops.py, etc. -- constitution Principle V: they hit the
+      # real live upstream mirror rather than mocking it, on purpose).
+      # `-m "not network"` deselects all 32 of them (pytest exit 5, "no
+      # tests collected") -- confirmed against a real CI run. GitHub-hosted
+      # runners have real internet access, so run the real suite instead of
+      # gating on zero coverage; occasional failures from real upstream
+      # drift (a hardcoded "current latest build" going stale) are an
+      # honest, low-frequency maintenance cost, not something to hide.
       - name: Run tests
         run: |
-          if [ "${{ matrix.project }}" = "registry" ]; then
-            # test_resolver.py/test_git_ops.py/etc. hit the real live
-            # upstream mirror and assert against its exact current state
-            # (constitution Principle V) -- they go stale as new upstream
-            # commits land, which is expected drift, not a code bug, so
-            # they're excluded from the CI gate (module docstrings already
-            # document this "pytest -m 'not network'" convention).
-            uv run --project registry pytest registry/tests -q -m "not network"
+          if [ "${{ matrix.project }}" = "tools/graphify-al" ]; then
+            # graphify-al is a vendored fork with its own huge upstream test
+            # suite covering many unrelated languages/features -- some of
+            # which (test_skillgen.py's doc-coverage audit) need graphify-
+            # al's own FULL git history, unavailable via our deliberately
+            # shallow submodule checkout (.gitmodules: shallow = true) and
+            # irrelevant to this project regardless. Scope CI to the AL
+            # extraction subset this project actually depends on and can
+            # break -- the same -k al_ filter used to validate every AL
+            # merge/change all session.
+            uv run --project tools/graphify-al pytest tools/graphify-al/tests -k "al_" -q
           else
             uv run --project ${{ matrix.project }} pytest ${{ matrix.project }}/tests -q
           fi
