@@ -7,6 +7,144 @@ exclude_patterns:
   - "warm/**"
   - "staging/**"
   - ".upstream-mirror/**"
+  # ~40% of all AL chunks in this corpus come from Tests-*/*Test*/*Test
+  # Library* directories (REPORT.md finding #6) that mcp_http_server.py's
+  # bcatlas_search already filters out of *results* by default -- but until
+  # now they were still fully chunked and embedded on every reindex just to
+  # be discarded at query time. That's real, avoidable cost: every fresh
+  # daemon pays a full, unmemoizable corpus reprocess (chunker/chunking.py's
+  # CHUNKER_REGISTRY comment), confirmed live to run past 2+ hours on the
+  # serving VM's CPU-only hardware. Excluding here cuts that ~40% out of
+  # every reindex directly, with no search-quality tradeoff (nobody's
+  # searching test code -- that's exactly why it was already being
+  # filtered downstream).
+  #
+  # Exact top-level directory names, not a wildcard-in-segment pattern like
+  # "**/*Test*/**" or "w1-28-src/*Test*/**": verified live (this session,
+  # against cocoindex_code.file_walk.build_matcher directly, not just
+  # reasoned about) that ANY `*` wildcard inside a single path segment here
+  # makes this vendored matcher's gitignore-cascading logic over-match at
+  # *any* depth below it too, not just the one intended level -- e.g. it
+  # wrongly excluded the real, non-test
+  # `Base Application/System/DevTools/CALTest/` directory even when the
+  # pattern was written to anchor to exactly one level below w1-28-src.
+  # Exact names (no wildcard within the matched segment, only the
+  # already-proven-safe "**/" prefix used by the other patterns above)
+  # don't trigger that. Regenerate this list if upstream adds/renames test
+  # directories:
+  #   python3 -c "
+  #   import re, os
+  #   pattern = re.compile(r'(?<![A-Za-z])Tests?(?![A-Za-z])')
+  #   for root in ('data/w1-28-src', 'data/docs', 'data/docs-devitpro'):
+  #       for e in sorted(os.listdir(root)):
+  #           if os.path.isdir(os.path.join(root, e)) and pattern.search(e):
+  #               print(f'  - \"**/{e}/**\"')"
+  - "**/AI Test Toolkit/**"
+  - "**/Application Test Library/**"
+  - "**/Audit File Export Tests/**"
+  - "**/Bank Account Reconciliation With AI Tests/**"
+  - "**/Business Foundation Test Libraries/**"
+  - "**/Business Foundation Tests/**"
+  - "**/Contoso Coffee Demo Dataset Tests/**"
+  - "**/Data Archive Tests/**"
+  - "**/Data Search Tests/**"
+  - "**/Dynamics BC Excel Reports Tests/**"
+  - "**/E-Document Connector - Avalara Tests/**"
+  - "**/E-Document Connector - B2Brouter Tests/**"
+  - "**/E-Document Connector - Continia Tests/**"
+  - "**/E-Document Connector - ForNAV Tests/**"
+  - "**/E-Document Connector - Logiq Tests/**"
+  - "**/E-Document Connector - Pagero Tests/**"
+  - "**/E-Document Connector - SignUp Tests/**"
+  - "**/E-Document Core Tests/**"
+  - "**/EU 3-Party Trade Purchase Tests/**"
+  - "**/Email - Current User Connector Tests/**"
+  - "**/Email - Microsoft 365 Connector Tests/**"
+  - "**/Email - SMTP API Test Library/**"
+  - "**/Email - SMTP API Tests/**"
+  - "**/Email - SMTP Connector Tests/**"
+  - "**/Enforced Digital Vouchers Test Library/**"
+  - "**/Enforced Digital Vouchers Tests/**"
+  - "**/Error Messages with Recommendations Tests/**"
+  - "**/Essential Business Headlines Test/**"
+  - "**/Excise Taxes Tests/**"
+  - "**/Field Service Integration Test/**"
+  - "**/Field Service Integration Test Library/**"
+  - "**/Intrastat Core Tests/**"
+  - "**/Late Payment Prediction Tests/**"
+  - "**/Manufacturing Tests/**"
+  - "**/OnPrem Permissions Tests/**"
+  - "**/PEPPOL Tests/**"
+  - "**/PayPal Payments Standard Tests/**"
+  - "**/Payment Practices Test Library/**"
+  - "**/Payment Practices Tests/**"
+  - "**/Performance Toolkit Tests/**"
+  - "**/PowerBI Reports Test Library/**"
+  - "**/PowerBI Reports Tests/**"
+  - "**/Quality Management Test Library/**"
+  - "**/Quality Management-Tests/**"
+  - "**/Recommended Apps Tests/**"
+  - "**/Report Layouts Tests/**"
+  - "**/SAF-T Tests/**"
+  - "**/Sales Lines Suggestions Tests/**"
+  - "**/Sales and Inventory Forecast Tests/**"
+  - "**/Service Declaration Tests/**"
+  - "**/Service Management Tests/**"
+  - "**/Shopify Connector Test/**"
+  - "**/Simplified Bank Statement Import Test/**"
+  - "**/Statistical Accounts Tests/**"
+  - "**/Subscription Billing Tests/**"
+  - "**/Sustainability Copilot Tests/**"
+  - "**/Sustainability Tests/**"
+  - "**/System Application Partner Test/**"
+  - "**/System Application Test/**"
+  - "**/System Application Test Library/**"
+  - "**/Test Runner/**"
+  - "**/Tests-Bank/**"
+  - "**/Tests-CRM integration/**"
+  - "**/Tests-Cash Flow/**"
+  - "**/Tests-Cost Accounting/**"
+  - "**/Tests-Data Exchange/**"
+  - "**/Tests-Dimension/**"
+  - "**/Tests-ERM/**"
+  - "**/Tests-Fixed Asset/**"
+  - "**/Tests-General Journal/**"
+  - "**/Tests-Graph/**"
+  - "**/Tests-Integration/**"
+  - "**/Tests-Job/**"
+  - "**/Tests-Local/**"
+  - "**/Tests-Marketing/**"
+  - "**/Tests-Misc/**"
+  - "**/Tests-Monitor Sensitive Fields/**"
+  - "**/Tests-Permissions/**"
+  - "**/Tests-Physical Inventory/**"
+  - "**/Tests-Prepayment/**"
+  - "**/Tests-Rapid Start/**"
+  - "**/Tests-Report/**"
+  - "**/Tests-Resource/**"
+  - "**/Tests-Reverse/**"
+  - "**/Tests-SCM/**"
+  - "**/Tests-SCM-Assembly/**"
+  - "**/Tests-SCM-Manufacturing/**"
+  - "**/Tests-SCM-Service/**"
+  - "**/Tests-SINGLESERVER/**"
+  - "**/Tests-SMB/**"
+  - "**/Tests-TestLibraries/**"
+  - "**/Tests-Upgrade/**"
+  - "**/Tests-User/**"
+  - "**/Tests-VAT/**"
+  - "**/Tests-Workflow/**"
+  - "**/VAT Group Management Tests/**"
+  - "**/Withholding Tax Tests/**"
+  - "**/_Exclude_APIV1_ Tests/**"
+  - "**/_Exclude_APIV2_ Tests/**"
+  - "**/_Exclude_Bank Deposits Tests/**"
+  - "**/_Exclude_Business_Events_Test/**"
+  - "**/_Exclude_Email Logging Using Graph API Tests/**"
+  - "**/_Exclude_Master_Data_Management_Test_Library/**"
+  - "**/_Exclude_Master_Data_Management_Tests/**"
+  - "**/_Exclude_PlanConfiguration_ Tests/**"
+  - "**/_Exclude_Review_General_Ledger_Entries_Tests/**"
 language_overrides:
   - ext: al
     lang: al
