@@ -283,7 +283,13 @@ def _invalid_warm_project_reason(path: Path) -> str | None:
     *warm*, promoted path, never a staging path).
     """
     if not path.is_dir():
-        return f"No warm data found for this (country, version) -- expected a built index at {path}."
+        return (
+            f"No warm data found for this (country, version) -- expected a built"
+            f" index at {path}. This pair has not been built yet. Request it via"
+            " the build server's bcatlas_request_version tool (same country/"
+            " version), then poll bcatlas_version_status until it reports ready"
+            " before retrying this call."
+        )
     try:
         from cocoindex_code.settings import target_sqlite_db_path
 
@@ -293,7 +299,9 @@ def _invalid_warm_project_reason(path: Path) -> str | None:
     if not db_path.exists():
         return (
             f"{path} exists but has no finished index yet (missing"
-            f" {db_path.name}) -- build may still be in progress."
+            f" {db_path.name}) -- build may still be in progress. Poll the build"
+            " server's bcatlas_version_status tool for this country/version and"
+            " retry once it reports ready."
         )
     return None
 
