@@ -13,14 +13,6 @@ jobs:
     # Only deploy when the CI run this was triggered by actually succeeded --
     # a push to master whose CI failed must never reach the public service.
     if: github.event.workflow_run.conclusion == 'success'
-    # Default (360min) worst case is uncomfortably close to a genuine
-    # cold-start search warm-up (scripts/wait-for-search-ready.py): a clean
-    # live measurement showed one pass running well past 2 hours, and
-    # mcp_http_server.py's stall watchdog can retry that up to 3x before
-    # giving up. Explicit headroom above that theoretical worst case --
-    # this should rarely if ever actually be needed now that the search
-    # daemon survives routine deploys (scripts/systemd/bcatlas-search.service.d).
-    timeout-minutes: 480
     steps:
       - name: Deploy over SSH
         run: |
