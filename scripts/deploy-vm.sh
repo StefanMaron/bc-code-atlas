@@ -44,6 +44,15 @@ main() {
   echo "==> restart services"
   sudo systemctl restart bcatlas.target
 
+  # A fresh daemon's first search pays a genuine ~30+ minute full corpus
+  # reprocess, unconditionally, by design -- see
+  # scripts/wait-for-search-ready.py's module docstring. Waiting for it here
+  # (instead of letting the first live user pay it, and letting "deploy
+  # complete" below lie about actual readiness) is the whole point of this
+  # step.
+  echo "==> waiting for search index to warm up"
+  python3 "$ROOT/scripts/wait-for-search-ready.py"
+
   echo "==> deploy complete: $(git rev-parse --short HEAD)"
 }
 

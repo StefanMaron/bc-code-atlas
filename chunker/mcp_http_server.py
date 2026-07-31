@@ -104,6 +104,15 @@ def _is_test_path(file_path: str) -> bool:
 # rationale as the build side), duplicated rather than cross-imported
 # because this project deliberately has no dependency on `build/` (see the
 # module docstring's multi-tenant routing note above).
+#
+# A second, distinct cause of what looked like the same "stall" was found
+# and fixed live (this session): a fresh daemon's first index of this
+# corpus is a genuine ~30+ minute full reprocess (see `_progress_signal`'s
+# docstring), during which the on-disk fingerprint this watchdog used to
+# check stayed completely flat -- so the watchdog was killing a perfectly
+# healthy, progressing reindex every `_STALL_TIMEOUT_S`, forever, before it
+# could ever finish. `_progress_signal` now also polls the daemon's live
+# IndexingProgress counters so this case reads as forward progress instead.
 _STALL_TIMEOUT_S = 90.0
 _STALL_POLL_INTERVAL_S = 5.0
 _MAX_STALL_RETRIES = 3
@@ -135,6 +144,51 @@ def _index_state_fingerprint(project_root: str) -> tuple[int, float]:
         total += st.st_size
         newest = max(newest, st.st_mtime)
     return (total, newest)
+
+
+def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
+    """Extends `_index_state_fingerprint` with the daemon's own live
+    `IndexingProgress` counters, fetched via a fresh `project_status()`
+    round trip -- confirmed live (this session) that a fresh daemon's
+    *first* index of this corpus is a genuine, unavoidable full reprocess
+    that runs 30+ minutes with the on-disk fingerprint completely flat the
+    whole time (`chunker/chunking.py`'s `CHUNKER_REGISTRY` docstring: custom
+    chunker callables aren't fingerprint-able, so cocoindex-code cannot
+    memoize across a daemon restart and reprocesses every file from
+    scratch -- confirmed by tracing `cocoindex/_internal/memo_fingerprint.py`
+    -- upstream-by-design, Principle VI, not something to patch). Disk
+    writes apparently only flush in an infrequent/late batch during that
+    pass, so the disk-only signal alone reads a genuinely healthy,
+    progressing reindex as a stall and kills the daemon before it can ever
+    finish -- an unrecoverable restart loop. `project_status()` opens its
+    own independent connection (`client._send` -> `_connect_and_handshake`
+    every call) and `daemon.py` dispatches each connection as its own
+    asyncio task with a lock-free `get_status()` read, so it stays
+    responsive even while an `index()`/`search()` call is in flight on a
+    different connection -- verified by reading `daemon.py`'s
+    `ProjectStatusRequest` handling. Best-effort: if the daemon is busy
+    enough that even this fails or times out oddly, fall back to the disk
+    signal alone rather than raising out of a progress check.
+    """
+    disk_total, disk_mtime = _index_state_fingerprint(project_root)
+    counters: tuple[int, ...] = ()
+    try:
+        from cocoindex_code import client as _client
+
+        status = _client.project_status(project_root)
+        if status.progress is not None:
+            p = status.progress
+            counters = (
+                p.num_execution_starts,
+                p.num_unchanged,
+                p.num_adds,
+                p.num_deletes,
+                p.num_reprocesses,
+                p.num_errors,
+            )
+    except Exception:
+        pass
+    return (disk_total, disk_mtime, counters)
 
 
 def _kill_shared_daemon_hard() -> None:
@@ -196,9 +250,11 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
     of hanging forever.
 
     `fn` runs on a background thread (there is no way to cancel a thread
-    blocked in `Connection.recv_bytes()`) while this polls the on-disk
-    index fingerprint. No change for `_STALL_TIMEOUT_S` means a genuine
-    stall -- kill the daemon (which unblocks the stuck thread with a
+    blocked in `Connection.recv_bytes()`) while this polls `_progress_signal`
+    (on-disk index fingerprint plus the daemon's own live IndexingProgress
+    counters -- see that function's docstring for why disk state alone
+    isn't a reliable signal here). No change for `_STALL_TIMEOUT_S` means a
+    genuine stall -- kill the daemon (which unblocks the stuck thread with a
     `RuntimeError`, since `index()`/`search()` both turn `EOFError` on the
     now-closed socket into one) and retry with a fresh daemon. Resuming is
     cheap and lossless: verified live (this session) that `ccc index`
@@ -217,13 +273,13 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
         thread = threading.Thread(target=_target, daemon=True)
         thread.start()
 
-        last_fp = _index_state_fingerprint(project_root)
+        last_fp = _progress_signal(project_root)
         last_progress = time.monotonic()
         while thread.is_alive():
             thread.join(timeout=_STALL_POLL_INTERVAL_S)
             if not thread.is_alive():
                 break
-            fp = _index_state_fingerprint(project_root)
+            fp = _progress_signal(project_root)
             now = time.monotonic()
             if fp != last_fp:
                 last_fp = fp
