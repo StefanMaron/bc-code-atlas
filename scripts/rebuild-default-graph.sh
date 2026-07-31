@@ -16,4 +16,4 @@ SEARCH_DIR="$ROOT/data/w1-28-src"
 cp "$ROOT/build/build/graphify.ignore.template" "$SEARCH_DIR/.graphifyignore"
 
 cd "$ROOT/tools/graphify-al"
-exec uv run python -m graphify update "$SEARCH_DIR"
+exec uv run --extra al python -m graphify update "$SEARCH_DIR"

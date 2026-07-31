@@ -14,16 +14,14 @@ git reset --hard origin/master
 git submodule update --init --recursive
 
 echo "==> uv sync (all subprojects)"
-for p in tools/cocoindex-code tools/graphify-al chunker aggregator registry build; do
+for p in tools/cocoindex-code chunker aggregator registry build; do
   uv sync --project "$p"
 done
-
-# tree-sitter-al isn't a hard pyproject dependency of graphify-al (AL support
-# is optional there) and chunker's own tree-sitter-al pin needs this
-# explicit install step to land in its own venv -- see chunker/pyproject.toml.
-echo "==> tree-sitter-al (chunker, graphify-al)"
-uv pip install --directory chunker "tree-sitter-al>=3.0.1"
-uv pip install --directory tools/graphify-al "tree-sitter-al>=3.0.1"
+# tools/graphify-al's AL support (tree-sitter-al) is an optional extra
+# there (graphify is multi-language, AL is opt-in) but not optional for
+# this project -- always sync it in. chunker's own tree-sitter-al pin is
+# already a hard dependency in chunker/pyproject.toml, no extra needed.
+uv sync --project tools/graphify-al --extra al
 
 echo "==> restart services"
 sudo systemctl restart bcatlas.target
