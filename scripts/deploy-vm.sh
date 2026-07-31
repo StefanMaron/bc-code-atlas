@@ -8,6 +8,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# The forced-command SSH session this runs under (see the CD deploy key's
+# authorized_keys entry) isn't a login shell, so ~/.local/bin (where uv
+# installs) isn't on PATH by default -- confirmed live, the first real CD
+# run failed with "uv: command not found". uv's own installer-generated env
+# script adds it idempotently.
+[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+
 echo "==> git pull"
 git fetch --quiet origin master
 git reset --hard origin/master
