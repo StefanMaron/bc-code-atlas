@@ -24,6 +24,11 @@ cd "$ROOT"
 # block up front, before executing any of it, so it's immune to the
 # underlying file changing after parsing.
 main() {
+  # Captured before `git reset --hard` moves HEAD, so we can tell below
+  # whether this deploy actually touched the search daemon's own code.
+  local old_head
+  old_head="$(git rev-parse HEAD)"
+
   echo "==> git pull"
   git fetch --quiet origin master
   git reset --hard origin/master
@@ -41,15 +46,46 @@ main() {
   # needed there.
   uv sync --project tools/graphify-al --extra al --extra mcp
 
+  # Idempotent: keeps /etc/systemd/system/bcatlas-search.service.d/'s
+  # KillMode=process override in sync with the tracked copy (see that
+  # file's own comment for the full why). daemon-reload is a no-op if
+  # nothing changed.
+  echo "==> sync systemd overrides"
+  sudo mkdir -p /etc/systemd/system/bcatlas-search.service.d
+  sudo cp "$ROOT/scripts/systemd/bcatlas-search.service.d/override.conf" \
+    /etc/systemd/system/bcatlas-search.service.d/override.conf
+  sudo systemctl daemon-reload
+
+  # With KillMode=process in effect, `systemctl restart bcatlas.target`
+  # below no longer kills the search daemon (`ccc run-daemon`) -- it
+  # survives and keeps serving from its already-warm state, which is the
+  # whole point (see the override's own comment). But that also means a
+  # code change to al_chunker or cocoindex-code itself wouldn't take
+  # effect until the daemon actually restarts -- so when this deploy
+  # touched either, explicitly kill the daemon's whole cgroup first
+  # (bypassing the override for this one intentional case via
+  # `--kill-whom=all`) so the restart below picks up the new code instead
+  # of silently continuing to serve with the old daemon.
+  if ! git diff --quiet "$old_head" HEAD -- chunker/ tools/cocoindex-code; then
+    echo "==> chunker/cocoindex-code changed -- killing the search daemon so it picks up the new code"
+    sudo systemctl kill --kill-whom=all --signal=SIGTERM bcatlas-search.service || true
+    sleep 2
+    sudo systemctl kill --kill-whom=all --signal=SIGKILL bcatlas-search.service || true
+  fi
+
   echo "==> restart services"
   sudo systemctl restart bcatlas.target
 
-  # A fresh daemon's first search pays a genuine ~30+ minute full corpus
-  # reprocess, unconditionally, by design -- see
-  # scripts/wait-for-search-ready.py's module docstring. Waiting for it here
-  # (instead of letting the first live user pay it, and letting "deploy
-  # complete" below lie about actual readiness) is the whole point of this
-  # step.
+  # Usually near-instant now (the daemon survived the restart above and is
+  # already warm). Only pays a real cost on a genuine cold start: first
+  # deploy after this change, a VM reboot, a crash, or the explicit kill
+  # just above -- a fresh daemon's first search pays a genuine, unavoidable
+  # full corpus reprocess (see chunker/chunking.py's CHUNKER_REGISTRY
+  # comment) that ran well past 2 hours in a clean live measurement this
+  # session on this VM's CPU-only hardware, not the ~30 minutes originally
+  # estimated. Waiting for it here either way (instead of letting the
+  # first live user pay it, and letting "deploy complete" below lie about
+  # actual readiness) is the whole point of this step.
   echo "==> waiting for search index to warm up"
   python3 "$ROOT/scripts/wait-for-search-ready.py"
 
