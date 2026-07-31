@@ -5,17 +5,23 @@
 Why this exists: `chunker/chunking.py`'s `CHUNKER_REGISTRY` docstring
 documents (and this session traced and confirmed via
 `cocoindex/_internal/memo_fingerprint.py`) that cocoindex-code cannot
-memoize its custom AL chunker across a daemon restart -- every fresh
-daemon (i.e. every deploy, since `deploy-vm.sh` restarts `bcatlas.target`)
-pays a genuine ~30+ minute full reprocess of the whole corpus on its
+memoize its custom AL chunker across a daemon restart -- a fresh daemon
+pays a genuine, unavoidable full reprocess of the whole corpus on its
 *first* search/index call, upstream-by-design (constitution Principle VI,
-not something to patch). Without this wait, `deploy-vm.sh` used to report
-"deploy complete" the instant `systemctl restart` returned, while real
-user queries hitting the still-cold daemon paid that cost inline (and,
-before a companion fix in `mcp_http_server.py`, could get caught in an
-watchdog restart loop that never finished at all). This makes that cost
-visible in the deploy log instead of silently landing on the first live
-user after every deploy.
+not something to patch). A clean live measurement this session showed this
+running well past 2 hours on this VM's CPU-only hardware -- much longer
+than the ~30 minutes first assumed. `scripts/systemd/bcatlas-search.service.d/override.conf`
+(installed by `deploy-vm.sh`) now keeps the daemon warm across *routine*
+deploys, so this should mostly only be paid on a genuine cold start (VM
+reboot, crash, or an explicit kill `deploy-vm.sh` issues when
+chunker/cocoindex-code code itself changed) rather than on every deploy.
+Without this wait, `deploy-vm.sh` used to report "deploy complete" the
+instant `systemctl restart` returned, while real user queries hitting a
+still-cold daemon paid that cost inline (and, before a companion fix in
+`mcp_http_server.py`, could get caught in a watchdog restart loop that
+never finished at all). This makes that cost visible in the deploy log
+instead of silently landing on the first live user after a cold-start
+deploy.
 
 Issues one real `bcatlas_search` call against the local chunker server
 (not the aggregator, to avoid coupling this wait to any other backend's
@@ -32,10 +38,13 @@ import urllib.error
 import urllib.request
 
 SEARCH_URL = "http://127.0.0.1:8801/mcp"
-# Generous: this call's own request can legitimately take 30-60+ minutes
-# on a cold daemon (see module docstring). Connection-refused retries
-# (server process still starting) use a much shorter budget below.
-REQUEST_TIMEOUT_S = 3600.0
+# Generous: this call's own request can legitimately take 2+ hours on a
+# cold daemon (see module docstring), and mcp_http_server.py's own stall
+# watchdog can retry that up to 3x on a genuine stall before giving up --
+# so this must comfortably exceed that worst case, not just one pass.
+# Connection-refused retries (server process still starting) use a much
+# shorter budget below.
+REQUEST_TIMEOUT_S = 4.0 * 3600.0
 CONNECT_RETRY_TIMEOUT_S = 120.0
 CONNECT_RETRY_INTERVAL_S = 2.0
 
@@ -81,8 +90,9 @@ def main() -> int:
     _wait_for_port()
 
     print(
-        "search server is up -- issuing a warm-up search (may take 30+ minutes on a "
-        "fresh daemon, see chunker/chunking.py's CHUNKER_REGISTRY comment)...",
+        "search server is up -- issuing a warm-up search (may take 2+ hours on a "
+        "genuinely cold daemon, see chunker/chunking.py's CHUNKER_REGISTRY comment; "
+        "near-instant if the daemon survived from a prior deploy)...",
         flush=True,
     )
     start = time.monotonic()
