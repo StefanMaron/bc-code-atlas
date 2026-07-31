@@ -20,7 +20,7 @@ EOF
 )}"
 
 cd "$ROOT/tools/graphify-al"
-exec uv run python -m graphify.serve \
+exec uv run --extra al python -m graphify.serve \
     "$ROOT/data/w1-28-src/graphify-out/graph.json" \
     --transport http \
     --host "${GRAPH_HOST:-127.0.0.1}" \

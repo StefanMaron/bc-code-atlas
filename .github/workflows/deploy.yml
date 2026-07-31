@@ -1,0 +1,27 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [master]
+    types: [completed]
+
+jobs:
+  deploy:
+    name: Deploy to bc-atlas VM
+    runs-on: ubuntu-latest
+    # Only deploy when the CI run this was triggered by actually succeeded --
+    # a push to master whose CI failed must never reach the public service.
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Deploy over SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST"
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.BCATLAS_DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.BCATLAS_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.BCATLAS_DEPLOY_USER }}

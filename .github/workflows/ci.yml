@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # aggregator/ and chunker/ have no test suite yet -- not included
+        # here because a "passing" CI job with zero tests collected would
+        # be misleading, not because they're exempt from ever needing one.
+        project: [registry, build, tools/graphify-al]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # registry/ and build/ path-depend on tools/graphify-al (build/ ->
+      # registry/ -> tools/graphify-al transitively) -- only that one
+      # submodule is needed for tests, not the multi-GB data/ corpora ones.
+      - name: Init tools/graphify-al submodule
+        run: git submodule update --init tools/graphify-al
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      # tools/graphify-al's AL support (tree-sitter-al) is an optional
+      # extra there (graphify is multi-language, AL is opt-in), so it needs
+      # --extra al explicitly -- everything else just needs a plain sync.
+      - name: Sync ${{ matrix.project }}
+        run: |
+          if [ "${{ matrix.project }}" = "tools/graphify-al" ]; then
+            uv sync --project ${{ matrix.project }} --extra al
+          else
+            uv sync --project ${{ matrix.project }}
+          fi
+
+      # registry/tests is *entirely* network-marked (test_resolver.py,
+      # test_git_ops.py, etc. -- constitution Principle V: they hit the
+      # real live upstream mirror rather than mocking it, on purpose).
+      # `-m "not network"` deselects all 32 of them (pytest exit 5, "no
+      # tests collected") -- confirmed against a real CI run. GitHub-hosted
+      # runners have real internet access, so run the real suite instead of
+      # gating on zero coverage; occasional failures from real upstream
+      # drift (a hardcoded "current latest build" going stale) are an
+      # honest, low-frequency maintenance cost, not something to hide.
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.project }}" = "tools/graphify-al" ]; then
+            # graphify-al is a vendored fork with its own huge upstream test
+            # suite covering many unrelated languages/features -- some of
+            # which (test_skillgen.py's doc-coverage audit) need graphify-
+            # al's own FULL git history, unavailable via our deliberately
+            # shallow submodule checkout (.gitmodules: shallow = true) and
+            # irrelevant to this project regardless. Scope CI to the AL
+            # extraction subset this project actually depends on and can
+            # break -- the same -k al_ filter used to validate every AL
+            # merge/change all session.
+            uv run --project tools/graphify-al pytest tools/graphify-al/tests -k "al_" -q
+          else
+            uv run --project ${{ matrix.project }} pytest ${{ matrix.project }}/tests -q
+          fi
+
+  smoke-import:
+    name: smoke-import (aggregator, chunker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      # No test suite exists for these two yet (tracked as a gap, not
+      # silently accepted) -- this at least catches an import-time/syntax
+      # break before it reaches master, better than nothing until real
+      # tests land.
+      - name: aggregator imports cleanly
+        run: |
+          uv sync --project aggregator
+          uv run --project aggregator --no-sync python -c "import sys; sys.path.insert(0, 'aggregator'); import unified_mcp_server"
+
+      # chunker isn't run from its own venv in production -- it's loaded as
+      # a plugin inside tools/cocoindex-code's process (see
+      # scripts/start-search-server.sh: `uv run --project tools/cocoindex-code
+      # python chunker/mcp_http_server.py`). A syntax-only check keeps this
+      # job cheap (cocoindex-code's venv is ~7GB with torch) without lying
+      # about coverage a full import would need the real venv for.
+      - name: chunker parses cleanly
+        run: python3 -c "import ast; ast.parse(open('chunker/al_chunker.py').read()); ast.parse(open('chunker/mcp_http_server.py').read())"
