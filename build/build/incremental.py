@@ -302,18 +302,23 @@ def _bootstrap_project_settings(search_dir: Path) -> None:
     shelling out to `ccc init` -- `ccc init` only ever writes
     cocoindex-code's generic, language-agnostic default settings, which
     would silently produce an AL-empty index. Also copies `al_chunker.py`
-    into the staging search dir itself as a defensive measure: this
+    into the staging search dir itself as a defensive measure -- this
     project's `chunkers: module: al_chunker:al_chunker` entry is resolved
     by the shared cocoindex-code daemon via a bare `importlib.import_module`
     (confirmed by source inspection -- no per-project `sys.path` insertion
-    exists anywhere in cocoindex-code). The copy alone doesn't make it
-    importable (copying a file into a directory doesn't put that directory
-    on `sys.path`) -- what actually resolves it is `_run_ccc_index` setting
-    `PYTHONPATH` on the `ccc index` subprocess's env, confirmed live (this
-    was a real production outage on the hosted default corpus: every
-    `bcatlas_search` call failed with `ModuleNotFoundError: No module named
-    'al_chunker'` until PYTHONPATH was added). This copy is now redundant
-    with that fix but kept as a cheap second line of defense.
+    exists anywhere in cocoindex-code, and the copy alone doesn't fix that:
+    copying a file into a directory doesn't put that directory on
+    `sys.path`). This was a real, two-part production outage on the hosted
+    default corpus (every `bcatlas_search` call failed, first with
+    `ModuleNotFoundError: No module named 'al_chunker'`, then -- after
+    fixing that half -- `... 'tree_sitter'`, al_chunker's own real
+    dependency) before `_run_ccc_index` started passing `--with-editable
+    <chunker dir>` to `uv run`: that builds an ephemeral overlay venv
+    merging cocoindex-code's own locked deps with chunker/'s (bc-al-chunker)
+    real ones, which the daemon this subprocess spawns inherits too (it
+    locates its own `ccc` executable via `Path(sys.executable).parent`).
+    This copy is now redundant with that fix but kept as a cheap second
+    line of defense.
     """
     settings_dir = search_dir / ".cocoindex_code"
     settings_dir.mkdir(parents=True, exist_ok=True)
@@ -474,14 +479,6 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
     ).hexdigest()[:16]
     env = dict(os.environ)
     env["COCOINDEX_CODE_RUNTIME_DIR"] = str(runtime_dir)
-    # See `_bootstrap_project_settings`'s docstring -- the daemon this `ccc
-    # index` subprocess spawns resolves `al_chunker` via a bare
-    # `importlib.import_module`, so it must already be on the daemon's own
-    # sys.path. `uv run` passes PYTHONPATH through to the subprocess (and
-    # its self-spawned `ccc run-daemon` child in turn) -- confirmed live.
-    env["PYTHONPATH"] = str(_CHUNKER_SOURCE_FILE.parent) + (
-        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
-    )
     runtime_dir.mkdir(parents=True, exist_ok=True)
     # Client output goes to a file, not a pipe: the client streams rich
     # spinner updates continuously, and an undrained pipe would fill and
@@ -497,7 +494,16 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
             attempt_start_fp = _index_state_fingerprint(search_dir)
             with open(client_log, "ab") as log_fd:
                 proc = subprocess.Popen(
-                    ["uv", "run", "--project", str(_COCOINDEX_PROJECT), "ccc", "index"],
+                    [
+                        "uv",
+                        "run",
+                        "--project",
+                        str(_COCOINDEX_PROJECT),
+                        "--with-editable",
+                        str(_CHUNKER_SOURCE_FILE.parent),
+                        "ccc",
+                        "index",
+                    ],
                     cwd=search_dir,
                     env=env,
                     stdout=log_fd,
