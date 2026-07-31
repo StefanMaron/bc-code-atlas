@@ -1,1 +1,3 @@
-{"feature_directory":"specs/001-multi-version-serving"}
+{
+  "feature_directory": "specs/002-federated-querying"
+}
