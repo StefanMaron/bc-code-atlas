@@ -81,17 +81,21 @@ confirmed via `bcatlas_version_status` and the promoted artifact on disk.
   for real; two manual attempts were contaminated by tooling/process
   collisions and discarded rather than reported).
 - ~~Whether the shared system-wide `ccc` daemon's chunker resolution
-  reliably finds `al_chunker`~~ — this was a real production outage, not a
-  theoretical risk: `bcatlas_search` failed on the hosted default corpus
-  with `ModuleNotFoundError: No module named 'al_chunker'` because nothing
-  ever put `al_chunker` on the daemon's own `sys.path` (`importlib.import_module`
-  has no per-project `sys.path` insertion anywhere in cocoindex-code, and
-  copying the file into a staging dir doesn't put that directory on
-  `sys.path` either). Fixed by setting `PYTHONPATH` on every process that
-  spawns a `ccc`/daemon subprocess (`scripts/start-search-server.sh`,
-  `build/build/incremental.py`'s `_run_ccc_index`) — confirmed `uv run`
-  passes `PYTHONPATH` through to the subprocess and the `ccc run-daemon`
-  child it spawns in turn.
+  reliably finds `al_chunker`~~ — this was a real, two-part production
+  outage, not a theoretical risk: `bcatlas_search` failed on the hosted
+  default corpus, first with `ModuleNotFoundError: No module named
+  'al_chunker'`, then (after a first PYTHONPATH-only fix that solved that
+  half) with `... 'tree_sitter'` (al_chunker's own real dependency).
+  `importlib.import_module` has no per-project `sys.path` insertion
+  anywhere in cocoindex-code, and copying the file into a staging dir
+  doesn't put that directory on `sys.path` either. Properly fixed by
+  passing `--with-editable <chunker dir>` to every `uv run` that spawns a
+  `ccc`/daemon subprocess (`scripts/start-search-server.sh`,
+  `build/build/incremental.py`'s `_run_ccc_index`) — builds an ephemeral
+  overlay venv merging cocoindex-code's own locked deps with chunker/'s
+  (bc-al-chunker) real ones, which the daemon these subprocesses spawn
+  inherits too (it locates its own `ccc` executable via
+  `Path(sys.executable).parent`).
 - Reindex-webhook wiring into the sandbox-history repo's own GitHub
   Actions is still not built — tracked as future work, the build/serve
   split it would wire into now exists.
