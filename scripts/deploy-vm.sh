@@ -22,8 +22,8 @@ done
 # is optional there) and chunker's own tree-sitter-al pin needs this
 # explicit install step to land in its own venv -- see chunker/pyproject.toml.
 echo "==> tree-sitter-al (chunker, graphify-al)"
-uv pip install --project chunker "tree-sitter-al>=3.0.1"
-uv pip install --project tools/graphify-al "tree-sitter-al>=3.0.1"
+uv pip install --directory chunker "tree-sitter-al>=3.0.1"
+uv pip install --directory tools/graphify-al "tree-sitter-al>=3.0.1"
 
 echo "==> restart services"
 sudo systemctl restart bcatlas.target

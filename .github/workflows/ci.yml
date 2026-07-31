@@ -42,7 +42,7 @@ jobs:
 
       - name: Install tree-sitter-al (graphify-al's AL support, not a hard pyproject dep)
         if: matrix.project == 'tools/graphify-al'
-        run: uv pip install --project ${{ matrix.project }} "tree-sitter-al>=3.0.1"
+        run: uv pip install --directory ${{ matrix.project }} "tree-sitter-al>=3.0.1"
 
       - name: Run tests
         run: uv run --project ${{ matrix.project }} pytest ${{ matrix.project }}/tests -q
@@ -73,5 +73,5 @@ jobs:
       - name: chunker imports cleanly
         run: |
           uv sync --project chunker
-          uv pip install --project chunker "tree-sitter-al>=3.0.1"
+          uv pip install --directory chunker "tree-sitter-al>=3.0.1"
           uv run --project chunker python -c "import sys; sys.path.insert(0, 'chunker'); import al_chunker"
