@@ -306,13 +306,14 @@ def _bootstrap_project_settings(search_dir: Path) -> None:
     project's `chunkers: module: al_chunker:al_chunker` entry is resolved
     by the shared cocoindex-code daemon via a bare `importlib.import_module`
     (confirmed by source inspection -- no per-project `sys.path` insertion
-    exists anywhere in cocoindex-code), so whether it actually resolves
-    depends on that daemon process's own `sys.path` at daemon-start time,
-    not on anything this subprocess call controls. See
-    `build/build/mcp_server.py`'s module docstring / this session's final
-    report for the full finding -- this is a real, load-bearing integration
-    risk for T028's multi-tenant chunker refactor, not fully solvable from
-    here.
+    exists anywhere in cocoindex-code). The copy alone doesn't make it
+    importable (copying a file into a directory doesn't put that directory
+    on `sys.path`) -- what actually resolves it is `_run_ccc_index` setting
+    `PYTHONPATH` on the `ccc index` subprocess's env, confirmed live (this
+    was a real production outage on the hosted default corpus: every
+    `bcatlas_search` call failed with `ModuleNotFoundError: No module named
+    'al_chunker'` until PYTHONPATH was added). This copy is now redundant
+    with that fix but kept as a cheap second line of defense.
     """
     settings_dir = search_dir / ".cocoindex_code"
     settings_dir.mkdir(parents=True, exist_ok=True)
@@ -473,6 +474,14 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
     ).hexdigest()[:16]
     env = dict(os.environ)
     env["COCOINDEX_CODE_RUNTIME_DIR"] = str(runtime_dir)
+    # See `_bootstrap_project_settings`'s docstring -- the daemon this `ccc
+    # index` subprocess spawns resolves `al_chunker` via a bare
+    # `importlib.import_module`, so it must already be on the daemon's own
+    # sys.path. `uv run` passes PYTHONPATH through to the subprocess (and
+    # its self-spawned `ccc run-daemon` child in turn) -- confirmed live.
+    env["PYTHONPATH"] = str(_CHUNKER_SOURCE_FILE.parent) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
     runtime_dir.mkdir(parents=True, exist_ok=True)
     # Client output goes to a file, not a pipe: the client streams rich
     # spinner updates continuously, and an undrained pipe would fill and

@@ -80,11 +80,18 @@ confirmed via `bcatlas_version_status` and the promoted artifact on disk.
   yet (constitution Principle V — don't assert one without measuring it
   for real; two manual attempts were contaminated by tooling/process
   collisions and discarded rather than reported).
-- Whether the shared system-wide `ccc` daemon's chunker resolution
-  (`importlib.import_module`, no per-project `sys.path` insertion in
-  cocoindex-code) reliably finds `al_chunker` for every brand-new staging
-  project is defensively mitigated (the chunker is copied into each
-  staging dir) but not proven across many builds yet.
+- ~~Whether the shared system-wide `ccc` daemon's chunker resolution
+  reliably finds `al_chunker`~~ — this was a real production outage, not a
+  theoretical risk: `bcatlas_search` failed on the hosted default corpus
+  with `ModuleNotFoundError: No module named 'al_chunker'` because nothing
+  ever put `al_chunker` on the daemon's own `sys.path` (`importlib.import_module`
+  has no per-project `sys.path` insertion anywhere in cocoindex-code, and
+  copying the file into a staging dir doesn't put that directory on
+  `sys.path` either). Fixed by setting `PYTHONPATH` on every process that
+  spawns a `ccc`/daemon subprocess (`scripts/start-search-server.sh`,
+  `build/build/incremental.py`'s `_run_ccc_index`) — confirmed `uv run`
+  passes `PYTHONPATH` through to the subprocess and the `ccc run-daemon`
+  child it spawns in turn.
 - Reindex-webhook wiring into the sandbox-history repo's own GitHub
   Actions is still not built — tracked as future work, the build/serve
   split it would wire into now exists.
