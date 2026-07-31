@@ -17,11 +17,13 @@ echo "==> uv sync (all subprojects)"
 for p in tools/cocoindex-code chunker aggregator registry build; do
   uv sync --project "$p"
 done
-# tools/graphify-al's AL support (tree-sitter-al) is an optional extra
-# there (graphify is multi-language, AL is opt-in) but not optional for
-# this project -- always sync it in. chunker's own tree-sitter-al pin is
-# already a hard dependency in chunker/pyproject.toml, no extra needed.
-uv sync --project tools/graphify-al --extra al
+# tools/graphify-al's AL support (tree-sitter-al) and MCP HTTP transport
+# (uvicorn/starlette) are both optional extras there (graphify is
+# multi-language and multi-transport by default) but neither is optional
+# for this project -- always sync both in. chunker's own tree-sitter-al
+# pin is already a hard dependency in chunker/pyproject.toml, no extra
+# needed there.
+uv sync --project tools/graphify-al --extra al --extra mcp
 
 echo "==> restart services"
 sudo systemctl restart bcatlas.target

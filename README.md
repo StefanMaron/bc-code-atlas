@@ -118,7 +118,7 @@ git -C data/docs-devitpro sparse-checkout init --cone && git -C data/docs-devitp
 
 # 1. Build each subproject's venv
 uv sync --project tools/cocoindex-code
-uv sync --project tools/graphify-al --extra al
+uv sync --project tools/graphify-al --extra al --extra mcp
 uv sync --project chunker
 uv sync --project aggregator
 uv sync --project registry
