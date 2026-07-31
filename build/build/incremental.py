@@ -479,6 +479,14 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
     ).hexdigest()[:16]
     env = dict(os.environ)
     env["COCOINDEX_CODE_RUNTIME_DIR"] = str(runtime_dir)
+    # See `scripts/start-search-server.sh` -- the embedding model is already
+    # fully cached locally, but without this the daemon still does dozens
+    # of etag-freshness round trips to huggingface.co on every cold start
+    # before loading from cache, which on the hosted VM took over 90s and
+    # tripped the search server's stall watchdog (unrelated to this
+    # subprocess directly, but the same daemon code path, so the same real
+    # fix applies here too).
+    env["HF_HUB_OFFLINE"] = "1"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     # Client output goes to a file, not a pipe: the client streams rich
     # spinner updates continuously, and an undrained pipe would fill and

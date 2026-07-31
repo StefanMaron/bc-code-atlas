@@ -5,6 +5,19 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The embedding model is already fully cached locally after first download,
+# but sentence-transformers/huggingface_hub still does dozens of sequential
+# HEAD/GET etag-freshness round trips to huggingface.co on every daemon
+# cold start (confirmed live) before loading from cache -- on the hosted
+# VM this alone took over 90s, tripping mcp_http_server.py's on-disk-
+# progress stall watchdog (which reasonably treats a search/query call as
+# stalled if nothing's been written under `.cocoindex_code/` for 90s: model
+# loading writes nothing there, so it always looked stalled to that
+# watchdog) and killing the daemon before it ever finished loading -- a
+# search-always-fails loop on every restart. HF_HUB_OFFLINE skips those
+# round trips entirely; confirmed live this cuts model load to ~8s.
+export HF_HUB_OFFLINE=1
+
 # cocoindex-code's shared daemon resolves this project's `chunkers: module:
 # al_chunker:al_chunker` setting via a bare `importlib.import_module` -- no
 # per-project sys.path insertion exists anywhere in cocoindex-code (it's a
