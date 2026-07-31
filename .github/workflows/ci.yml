@@ -26,6 +26,12 @@ jobs:
         with:
           submodules: false
 
+      # registry/ and build/ path-depend on tools/graphify-al (build/ ->
+      # registry/ -> tools/graphify-al transitively) -- only that one
+      # submodule is needed for tests, not the multi-GB data/ corpora ones.
+      - name: Init tools/graphify-al submodule
+        run: git submodule update --init tools/graphify-al
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
