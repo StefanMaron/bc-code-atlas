@@ -161,30 +161,20 @@ matching CLAUDE.md's two validation scenarios).
 
 ## Connecting to the hosted instance
 
-If you're a tester connecting to someone else's already-running instance
-(exposed per [CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)) rather than
-running your own locally, you'll be given a hostname plus a **Cloudflare
-Access Service Token** (a `CF-Access-Client-Id` / `CF-Access-Client-Secret`
-pair) — the tunnel's Access gate rejects everything else with a `403`.
-Never commit the secret to a repo or paste it in plain text where it'll
-persist; the examples below use a placeholder.
+The public instance is live at `https://bc-code-atlas.stefanmaron.dev/mcp` —
+no auth required, just point an MCP client at it.
 
 ### Claude Code
 
 Project-scoped `.mcp.json` (or `claude mcp add --transport http bc-code-atlas
-https://<hostname>/mcp --header "CF-Access-Client-Id: <client-id>" --header
-"CF-Access-Client-Secret: <client-secret>"`):
+https://bc-code-atlas.stefanmaron.dev/mcp`):
 
 ```json
 {
   "mcpServers": {
     "bc-code-atlas": {
       "type": "http",
-      "url": "https://<hostname>/mcp",
-      "headers": {
-        "CF-Access-Client-Id": "<client-id>",
-        "CF-Access-Client-Secret": "<client-secret>"
-      }
+      "url": "https://bc-code-atlas.stefanmaron.dev/mcp"
     }
   }
 }
@@ -192,40 +182,28 @@ https://<hostname>/mcp --header "CF-Access-Client-Id: <client-id>" --header
 
 ### GitHub Copilot (VS Code / Visual Studio / JetBrains)
 
-`.vscode/mcp.json` (workspace) or the user-profile `mcp.json` — using the
-`inputs` block prompts for the secret instead of storing it in the file at
-all, which is the preferred way to avoid it ending up in source control:
+`.vscode/mcp.json` (workspace) or the user-profile `mcp.json`:
 
 ```json
 {
-  "inputs": [
-    {
-      "id": "cf-access-client-id",
-      "type": "promptString",
-      "description": "Cloudflare Access Client ID for bc-code-atlas"
-    },
-    {
-      "id": "cf-access-client-secret",
-      "type": "promptString",
-      "description": "Cloudflare Access Client Secret for bc-code-atlas",
-      "password": true
-    }
-  ],
   "servers": {
     "bc-code-atlas": {
       "type": "http",
-      "url": "https://<hostname>/mcp",
-      "headers": {
-        "CF-Access-Client-Id": "${input:cf-access-client-id}",
-        "CF-Access-Client-Secret": "${input:cf-access-client-secret}"
-      }
+      "url": "https://bc-code-atlas.stefanmaron.dev/mcp"
     }
   }
 }
 ```
 
-VS Code prompts once per window and caches the answer for the session — you
-won't be asked again until you reload.
+### Prefer a CLI over an MCP server entry?
+
+`skills/bc-code-atlas-cli/` is a lightweight CLI wrapper covering all
+`bcatlas_*` tools with compact text output instead of a live MCP server
+entry — no tool schema loaded into an agent's context per spawn. Copy that
+directory into your coding agent's skills directory (e.g.
+`~/.claude/skills/bc-code-atlas-cli/`) and see its `SKILL.md` for usage. It
+defaults to the public hosted instance above; point it at a self-hosted or
+federated deployment instead via `BC_CODE_ATLAS_URL`.
 
 ## Usage
 
