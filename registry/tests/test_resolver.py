@@ -34,6 +34,20 @@ def test_resolve_exact_version_string(_mirror):
     # Real, fixed build on the real w1-28 branch (same commit test_git_ops.py
     # anchors on) -- confirmed live via `git log` against the real upstream
     # mirror during development of this module.
+    #
+    # UPDATE 2026-07-31: the expected commit_sha below changed from the
+    # original e94dbd8173ef42cfa4883983eb07c758b13c749f. Confirmed live via
+    # the GitHub API that BOTH shas exist with the identical commit message
+    # and author timestamp -- the upstream mirror's w1-28 branch history was
+    # rewritten at some point, and the old sha is no longer reachable from
+    # the current tip (still directly fetchable by sha, which is exactly
+    # what test_resolve_exact_commit_sha below still verifies -- it's the
+    # walked-branch-log path in resolve_version that now finds the new one).
+    # resolve_version's own ambiguous-match guard (see resolver.py's "Not
+    # observed live, but never silently pick one" comment) correctly did
+    # NOT fire here, because only one of the two duplicates is actually in
+    # the branch's current walked history -- this is real upstream mirror
+    # drift, not a resolver bug.
     spec = "w1-28.1.49838.51992"
 
     result = resolver.resolve_version(_COUNTRY, spec, mirror_dir=_mirror)
@@ -42,7 +56,7 @@ def test_resolve_exact_version_string(_mirror):
     assert result.resolved is True
     assert result.country == _COUNTRY
     assert result.version_string == spec
-    assert result.commit_sha == "e94dbd8173ef42cfa4883983eb07c758b13c749f"
+    assert result.commit_sha == "312dd91685771271372d53a8350ca168633c3889"
 
 
 def test_resolve_exact_commit_sha(_mirror):
@@ -64,8 +78,10 @@ def test_resolve_loose_major_minor_picks_single_highest_build(_mirror):
     assert result.country == _COUNTRY
     # Real highest w1-28.1.* build, confirmed live via
     # `git log --format='%s' | grep '^w1-28\\.1\\.' | sort` against the real
-    # upstream mirror during development of this module.
-    assert result.version_string == "w1-28.1.49838.52183"
+    # upstream mirror. UPDATE 2026-07-31: new builds have landed upstream
+    # since this was first written -- expected drift (module docstring),
+    # not a code bug.
+    assert result.version_string == "w1-28.1.49838.53124"
     assert result.version_string.startswith("w1-28.1.")
 
 
@@ -135,7 +151,9 @@ def test_list_major_versions_summarizes_by_major_minor(_mirror):
     assert "28.1" in major_minors
     assert "28.2" in major_minors
     entry = next(v for v in versions if v["major_minor"] == "28.1")
-    assert entry["latest_build"] == "w1-28.1.49838.52183"
+    # UPDATE 2026-07-31: expected drift, see
+    # test_resolve_loose_major_minor_picks_single_highest_build above.
+    assert entry["latest_build"] == "w1-28.1.49838.53124"
 
 
 def test_list_major_versions_returns_none_for_unknown_country(_mirror):
