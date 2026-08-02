@@ -161,7 +161,41 @@ def _index_state_fingerprint(project_root: str) -> tuple[int, float]:
     return (total, newest)
 
 
-def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
+def _daemon_cpu_ticks() -> int | None:
+    """Total (utime+stime) CPU jiffies for the shared `ccc` daemon process,
+    read directly from `/proc/<pid>/stat` (Linux-only, matches this
+    project's only deployment target -- no new dependency needed). `None`
+    if the pidfile/proc entry isn't readable (daemon not up, or a
+    permission/race hiccup -- best-effort, same rationale as the
+    `project_status()` fallback below).
+
+    Added after a live-reproduced false stall (this session, the hosted
+    VM): `project_status()` and the on-disk fingerprint both read as flat
+    for three consecutive 300s windows while the daemon (confirmed via
+    direct `ps`) was continuously burning ~99%+ CPU and the target DB was
+    genuinely, if slowly, growing -- `_run_with_stall_recovery` gave up and
+    reported failure even though the daemon was healthy and kept running
+    to real completion afterward on its own. Raw CPU ticks are a much
+    cheaper and more direct "is this process actually doing something"
+    signal than either of the above, and specifically distinguish this
+    case from the documented genuine stall (daemon.py's real upstream bug,
+    "every thread sleeping, zero CPU accrual") this watchdog exists to
+    catch -- a daemon burning CPU is by definition not that.
+    """
+    try:
+        from cocoindex_code._daemon_paths import daemon_pid_path
+
+        pid = int(daemon_pid_path().read_text().strip())
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()
+        # After the last ")" (closes the process name, which itself can
+        # contain spaces/parens): field 0 is state, fields 11/12 (0-indexed
+        # from there) are utime/stime in clock ticks (man proc(5)).
+        return int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...], int | None]:
     """Extends `_index_state_fingerprint` with the daemon's own live
     `IndexingProgress` counters, fetched via a fresh `project_status()`
     round trip -- confirmed live (this session) that a fresh daemon's
@@ -184,8 +218,13 @@ def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
     `ProjectStatusRequest` handling. Best-effort: if the daemon is busy
     enough that even this fails or times out oddly, fall back to the disk
     signal alone rather than raising out of a progress check.
+
+    Also includes `_daemon_cpu_ticks()` -- see its own docstring for why:
+    both signals above were observed live to plateau for 300s+ at a time
+    on a genuinely healthy, actively-computing daemon.
     """
     disk_total, disk_mtime = _index_state_fingerprint(project_root)
+    cpu_ticks = _daemon_cpu_ticks()
     counters: tuple[int, ...] = ()
     try:
         from cocoindex_code import client as _client
@@ -203,7 +242,7 @@ def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
             )
     except Exception:
         pass
-    return (disk_total, disk_mtime, counters)
+    return (disk_total, disk_mtime, counters, cpu_ticks)
 
 
 def _kill_shared_daemon_hard() -> None:
