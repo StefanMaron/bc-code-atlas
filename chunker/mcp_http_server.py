@@ -351,6 +351,26 @@ def _kill_shared_daemon_hard() -> None:
     _daemon_client._daemon_ensured = False
 
 
+# Serializes every call into `_run_with_stall_recovery` from this process.
+# Real upstream bug, not theorized -- cocoindex-io/cocoindex-code#243 (open
+# as of this writing): daemon-start coordination inside `client.py` is
+# process-local (a module-level `_daemon_ensured` flag), so two concurrent
+# callers can each observe "no daemon answered" and independently call
+# `start_daemon()`, racing over the same PID/socket paths and leaving a
+# duplicate, untracked daemon process behind -- upstream's own fix (still
+# unmerged) is a cross-process file lock; this project vendors cocoindex-code
+# unforked (constitution Principle VI) so that fix can't be pulled in early.
+# But this server only ever runs as a single process (one systemd unit, no
+# worker pool), so a plain in-process lock closes the exact race we hit live
+# on the hosted VM (two sibling `ccc run-daemon` processes spawned by the
+# same parent within seconds of each other, confirmed via `ps` PGID/SID).
+# Every `index()`/`search()` call reconnects fresh (`client._send`'s own
+# docstring: "Open connection, handshake, send one request, read one
+# response, close"), so the race window exists on every call, not just the
+# first -- this must wrap the whole daemon-touching call, not just startup.
+_daemon_call_lock = threading.Lock()
+
+
 def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
     """Run a blocking `cocoindex_code.client` call (`index`/`search`) to
     completion, recovering from the documented daemon stall above instead
@@ -367,7 +387,19 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
     cheap and lossless: verified live (this session) that `ccc index`
     picks back up from its on-disk LMDB/SQLite state within ~40s of a
     kill, re-embedding nothing already completed.
+
+    Holds `_daemon_call_lock` for its entire body -- see that module-level
+    comment for why. This does serialize concurrent searches/indexes
+    through this one process, but the daemon itself is a single shared
+    instance either way (this isn't adding a bottleneck beyond what already
+    existed), and stability under concurrent access matters more here than
+    shaving latency off an already-occasional call.
     """
+    with _daemon_call_lock:
+        return _run_with_stall_recovery_locked(fn, project_root)
+
+
+def _run_with_stall_recovery_locked(fn: Callable[[], _T], project_root: str) -> _T:
     for attempt in range(1, _MAX_STALL_RETRIES + 1):
         outcome: dict[str, object] = {}
 
