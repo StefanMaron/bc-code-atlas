@@ -76,10 +76,33 @@ built for real through the actual build queue (not an ad hoc script),
 confirmed via `bcatlas_version_status` and the promoted artifact on disk.
 
 **Known open items, not yet fully closed:**
-- No trustworthy incremental-vs-cold wall-clock number has been captured
-  yet (constitution Principle V — don't assert one without measuring it
-  for real; two manual attempts were contaminated by tooling/process
-  collisions and discarded rather than reported).
+- ~~No trustworthy incremental-vs-cold wall-clock number has been
+  captured yet~~ — now measured for real, twice, on both sides (see "Key
+  facts already established" below): builds are fast (minutes), the
+  shared serving daemon's cold reindex is genuinely slow (many hours on
+  the hosted VM's 4-vCPU hardware), not the ~30min/~2hr originally
+  assumed. This asymmetry is expected and fine — see that section for why.
+- The hosted search daemon's stall-recovery watchdog killed the *wrong*
+  process for an unknown amount of past time (fixed, not yet re-verified
+  end to end): `daemon.pid` can go stale mid-run, pointing at an
+  already-dead sibling from an earlier spawn attempt while the real,
+  actively-computing daemon runs on as a completely untracked process —
+  live-reproduced on the hosted VM. `_kill_shared_daemon_hard` now
+  cross-checks via `/proc` instead of trusting the pidfile alone
+  (`chunker/mcp_http_server.py`'s `_child_daemon_pids`), and the stall
+  watchdog now also treats real CPU burn as forward progress
+  (`_daemon_cpu_ticks`), not just the on-disk fingerprint/live counters —
+  both signals were independently observed live to plateau for 300s+ on a
+  genuinely healthy, actively-computing daemon. Whether this fully closes
+  the failure mode (vs. just making it much rarer) isn't yet proven —
+  needs another real stall to occur and be correctly recovered from, not
+  just reasoned about.
+- Corollary gap, not yet fixed: a daemon that dies mid-warmup (e.g. the
+  client that triggered it disconnects) has no self-healing — nothing
+  retries until the next real client request happens to come in. Live-
+  reproduced this session: search was silently down for ~2 days because
+  the one request that would have retried it never arrived. A periodic
+  local health-check/keepalive would close this; proposed, not built.
 - ~~Whether the shared system-wide `ccc` daemon's chunker resolution
   reliably finds `al_chunker`~~ — this was a real, two-part production
   outage, not a theoretical risk: `bcatlas_search` failed on the hosted
@@ -110,6 +133,33 @@ here since they're not principles, just measurements:
 - Same-country version hops are cheap: a full 99-build span on `w1-28`
   (`w1-28.1.49838.50848` → `w1-28.2.50931.52151`, i.e. exactly a "28.1 vs
   28.2" comparison) touched 269 of the corpus's `.al` files — roughly 1%.
+- `bcatlas_request_version` builds land well inside the target (10-30 min)
+  SLA — measured live, twice, re-running the same two real incremental
+  builds before/after a fix: a 75-changed-file hop went 332s → 176s, a
+  1897-changed-file hop went 863s → 409s. The fix
+  (`graphify update --no-report`, `build/build/incremental.py`'s
+  `_run_graphify_update`) skips `graphify-al`'s report-only computations
+  (`score_all`/`god_nodes`/`surprising_connections`/`suggest_questions`/
+  `generate`) — cProfile showed these dominating up to 90% of build
+  wall-clock via a full-graph `betweenness_centrality` call, purely to
+  populate a `GRAPH_REPORT.md` section nothing programmatic reads (the
+  equivalent served MCP tools recompute live from the graph on query
+  instead). Community detection (`cluster`) itself still runs every build
+  — that's real, necessary work feeding `graph.json`.
+- The shared serving daemon's cold reindex is genuinely slow — much
+  slower than either the original ~30min estimate or the "well past 2
+  hours" figure from earlier this session, and this is now measured with
+  real IndexingProgress counters, not inferred from DB file size: ~39% of
+  ~24,300 files done after ~6 hours on the hosted VM's 4-vCPU hardware, in
+  a clean, single-daemon, non-thrashing run. This is a genuine, different
+  problem from the build-side one above (build reuses a warm sibling's
+  already-indexed `.cocoindex_code/` state; a fresh daemon process cannot
+  trust ANY prior state at all, warm or not — `chunker/chunking.py`'s
+  `CHUNKER_REGISTRY` comment). Don't assume this number is stable across
+  VM/corpus changes — re-measure via `project_status()`'s live counters
+  (`num_unchanged + num_reprocesses` vs. `total_files`) rather than
+  inferring from `target_sqlite.db`'s byte size, which was observed live
+  to plateau for very long stretches during genuine, healthy compute.
 - Cross-country content overlap is much higher than git ancestry suggests:
   `w1-28` vs `us-28` share ~87% byte-identical `.al` files at the same
   path (10,962 of 12,604 in `us-28`) despite the two branches having no
