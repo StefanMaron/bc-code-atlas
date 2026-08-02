@@ -161,7 +161,41 @@ def _index_state_fingerprint(project_root: str) -> tuple[int, float]:
     return (total, newest)
 
 
-def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
+def _daemon_cpu_ticks() -> int | None:
+    """Total (utime+stime) CPU jiffies for the shared `ccc` daemon process,
+    read directly from `/proc/<pid>/stat` (Linux-only, matches this
+    project's only deployment target -- no new dependency needed). `None`
+    if the pidfile/proc entry isn't readable (daemon not up, or a
+    permission/race hiccup -- best-effort, same rationale as the
+    `project_status()` fallback below).
+
+    Added after a live-reproduced false stall (this session, the hosted
+    VM): `project_status()` and the on-disk fingerprint both read as flat
+    for three consecutive 300s windows while the daemon (confirmed via
+    direct `ps`) was continuously burning ~99%+ CPU and the target DB was
+    genuinely, if slowly, growing -- `_run_with_stall_recovery` gave up and
+    reported failure even though the daemon was healthy and kept running
+    to real completion afterward on its own. Raw CPU ticks are a much
+    cheaper and more direct "is this process actually doing something"
+    signal than either of the above, and specifically distinguish this
+    case from the documented genuine stall (daemon.py's real upstream bug,
+    "every thread sleeping, zero CPU accrual") this watchdog exists to
+    catch -- a daemon burning CPU is by definition not that.
+    """
+    try:
+        from cocoindex_code._daemon_paths import daemon_pid_path
+
+        pid = int(daemon_pid_path().read_text().strip())
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()
+        # After the last ")" (closes the process name, which itself can
+        # contain spaces/parens): field 0 is state, fields 11/12 (0-indexed
+        # from there) are utime/stime in clock ticks (man proc(5)).
+        return int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...], int | None]:
     """Extends `_index_state_fingerprint` with the daemon's own live
     `IndexingProgress` counters, fetched via a fresh `project_status()`
     round trip -- confirmed live (this session) that a fresh daemon's
@@ -184,8 +218,13 @@ def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
     `ProjectStatusRequest` handling. Best-effort: if the daemon is busy
     enough that even this fails or times out oddly, fall back to the disk
     signal alone rather than raising out of a progress check.
+
+    Also includes `_daemon_cpu_ticks()` -- see its own docstring for why:
+    both signals above were observed live to plateau for 300s+ at a time
+    on a genuinely healthy, actively-computing daemon.
     """
     disk_total, disk_mtime = _index_state_fingerprint(project_root)
+    cpu_ticks = _daemon_cpu_ticks()
     counters: tuple[int, ...] = ()
     try:
         from cocoindex_code import client as _client
@@ -203,11 +242,80 @@ def _progress_signal(project_root: str) -> tuple[int, float, tuple[int, ...]]:
             )
     except Exception:
         pass
-    return (disk_total, disk_mtime, counters)
+    return (disk_total, disk_mtime, counters, cpu_ticks)
+
+
+def _child_daemon_pids() -> list[int]:
+    """Every direct child of this server's own process whose cmdline looks
+    like a `ccc run-daemon` -- a cross-check against `daemon_pid_path()`,
+    not a replacement for it.
+
+    Found live (this session, the hosted VM): the pidfile pointed at PID
+    313140, already dead/zombied, while the real, actively-computing
+    daemon was PID 313141 -- a completely separate process group (own
+    PGID/SID, per `start_new_session=True`), spawned as a SIBLING of
+    313140 (both direct children of this same server process) rather than
+    ever replacing it in the pidfile. `_kill_shared_daemon_hard`'s
+    `os.killpg(pidfile_pid, ...)` had been silently killing nothing but
+    that already-dead zombie on every "stall" for hours, while the real
+    daemon ran on completely untouched. Enumerating our own children
+    directly via `/proc` (Linux-only, matches this project's only
+    deployment target) catches this regardless of which PID the vendored
+    client library's pidfile happens to be tracking.
+    """
+    own_pid = os.getpid()
+    pids: list[int] = []
+    try:
+        proc = Path("/proc")
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                stat_fields = (entry / "stat").read_text().rsplit(")", 1)[-1].split()
+                ppid = int(stat_fields[1])
+                if ppid != own_pid:
+                    continue
+                cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ")
+                if b"run-daemon" in cmdline or b"ccc" in cmdline:
+                    pids.append(pid)
+            except (OSError, ValueError, IndexError):
+                continue
+    except OSError:
+        pass
+    return pids
+
+
+def _kill_pid_group(pid: int) -> None:
+    """SIGTERM -> SIGKILL a process group by PID, tolerating either side
+    already being gone. Shared by `_kill_shared_daemon_hard` for both the
+    pidfile-tracked PID and any extra orphans `_child_daemon_pids` finds.
+    """
+    for sig, grace_s in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return
+        deadline = time.monotonic() + grace_s
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.2)
 
 
 def _kill_shared_daemon_hard() -> None:
-    """SIGTERM -> SIGKILL the shared `ccc` daemon by its own pidfile.
+    """SIGTERM -> SIGKILL the shared `ccc` daemon by its own pidfile, plus
+    any of this server's own child `ccc run-daemon` processes the pidfile
+    doesn't mention (see `_child_daemon_pids`'s docstring for why that
+    cross-check exists -- a live-reproduced stale-pidfile orphan, not a
+    theoretical one).
 
     Deliberately NOT `cocoindex_code.client.stop_daemon()`: its graceful
     path does a blocking socket `recv_bytes()` against the daemon, which
@@ -234,28 +342,12 @@ def _kill_shared_daemon_hard() -> None:
         pid = int(pid_file.read_text().strip())
     except (OSError, ValueError):
         pid = None
+
+    targets = set(_child_daemon_pids())
     if pid is not None:
-        for sig, grace_s in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
-            try:
-                os.killpg(pid, sig)
-            except ProcessLookupError:
-                break
-            except PermissionError:
-                try:
-                    os.kill(pid, sig)
-                except ProcessLookupError:
-                    break
-            deadline = time.monotonic() + grace_s
-            gone = False
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    gone = True
-                    break
-                time.sleep(0.2)
-            if gone:
-                break
+        targets.add(pid)
+    for target in targets:
+        _kill_pid_group(target)
     _daemon_client._daemon_ensured = False
 
 
