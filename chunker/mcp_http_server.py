@@ -113,7 +113,22 @@ def _is_test_path(file_path: str) -> bool:
 # healthy, progressing reindex every `_STALL_TIMEOUT_S`, forever, before it
 # could ever finish. `_progress_signal` now also polls the daemon's live
 # IndexingProgress counters so this case reads as forward progress instead.
-_STALL_TIMEOUT_S = 90.0
+#
+# A third cause, found live on the hosted VM (this session, two days after
+# the above): even with the combined signal, 90s was still too short for
+# THIS corpus's cold-start latency on the VM's 4-vCPU hardware -- a real
+# attempt accumulated 5+ minutes of genuine CPU time (verified via `ps`
+# %CPU/cumulative TIME, not assumed) with zero disk/counter movement the
+# entire time before hitting the old 90s ceiling and being killed, so every
+# retry restarted from scratch with nothing ever surviving long enough to
+# get durably written -- an infinite loop that could never converge, not
+# just a slow one. `build/build/incremental.py`'s own equivalent watchdog
+# had already been tuned to 300s based on live measurement ("daemon start
+# -> first index-DB write took under a minute once unblocked") -- this
+# side never got the same update when it was duplicated from that one (see
+# comment above). Matching that already-validated value here instead of
+# re-deriving it.
+_STALL_TIMEOUT_S = 300.0
 _STALL_POLL_INTERVAL_S = 5.0
 _MAX_STALL_RETRIES = 3
 
