@@ -618,8 +618,24 @@ def _run_graphify_update(
     export over the ENTIRE merged graph (265K+ nodes) every time, none of
     which is incremental. Those full-graph steps -- not AST extraction --
     dominate this pipeline's wall-clock, which is why the speedup is real
-    but far smaller than the changed-file ratio would suggest. IMPORTANT
-    caller obligation established by the same measurement: `changed_paths`
+    but far smaller than the changed-file ratio would suggest.
+
+    Always passes `--no-report` (bc-code-atlas's own addition to the
+    graphify-al fork, same rationale as `--changed-paths-file` above): a
+    later profiling pass (cProfile on a real 75-changed-file incremental
+    build) found `suggest_questions`'s full-graph `betweenness_centrality`
+    call alone -- purely to populate a GRAPH_REPORT.md section -- at ~30%
+    of `graphify update`'s total wall-clock on this corpus's 267K-node
+    graph, and none of it (score_all/god_nodes/surprising_connections/
+    suggest_questions/generate) feeds graph.json or any served MCP tool;
+    `bcatlas_god_nodes` and the `graphify://surprises` resource recompute
+    their own outputs live from the graph on query instead of reading this
+    build-time output (see graphify-al's serve.py). GRAPH_REPORT.md and
+    `.graphify_labels.json` are simply left stale/untouched in the staging
+    (and therefore promoted warm) dir rather than regenerated on every
+    build -- nothing in this project's own build/serve stack reads either
+    file. IMPORTANT caller obligation established by the earlier measurement:
+    `changed_paths`
     only helps if the STAGING `graph_dir` already contains the base's prior
     `graph.json` before this call -- `_rebuild_code` reads `existing
     graph.json` from wherever `GRAPHIFY_OUT` (`graph_dir`) points, and an
@@ -638,6 +654,7 @@ def _run_graphify_update(
     cmd = [
         "uv", "run", "--project", str(_GRAPHIFY_PROJECT),
         "python", "-m", "graphify", "update", str(search_dir),
+        "--no-report",
     ]
 
     changed_paths_file: Path | None = None

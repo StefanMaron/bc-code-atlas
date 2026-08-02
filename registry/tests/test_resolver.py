@@ -48,6 +48,14 @@ def test_resolve_exact_version_string(_mirror):
     # NOT fire here, because only one of the two duplicates is actually in
     # the branch's current walked history -- this is real upstream mirror
     # drift, not a resolver bug.
+    #
+    # UPDATE 2026-08-02: changed again, from 312dd91685771271372d53a8350ca
+    # 168633c3889 to 88503b3fb425952d8b67a467b70bc926af4d8f45. Confirmed
+    # live (this session) via `git log --all --format='%H %s'` against the
+    # real upstream mirror: the branch was rewritten again since 2026-07-31,
+    # and a real, live CI run picked up the new value independently of any
+    # local state -- same expected-drift situation as before, not a
+    # resolver bug.
     spec = "w1-28.1.49838.51992"
 
     result = resolver.resolve_version(_COUNTRY, spec, mirror_dir=_mirror)
@@ -56,7 +64,7 @@ def test_resolve_exact_version_string(_mirror):
     assert result.resolved is True
     assert result.country == _COUNTRY
     assert result.version_string == spec
-    assert result.commit_sha == "312dd91685771271372d53a8350ca168633c3889"
+    assert result.commit_sha == "88503b3fb425952d8b67a467b70bc926af4d8f45"
 
 
 def test_resolve_exact_commit_sha(_mirror):
@@ -78,10 +86,10 @@ def test_resolve_loose_major_minor_picks_single_highest_build(_mirror):
     assert result.country == _COUNTRY
     # Real highest w1-28.1.* build, confirmed live via
     # `git log --format='%s' | grep '^w1-28\\.1\\.' | sort` against the real
-    # upstream mirror. UPDATE 2026-07-31: new builds have landed upstream
-    # since this was first written -- expected drift (module docstring),
-    # not a code bug.
-    assert result.version_string == "w1-28.1.49838.53124"
+    # upstream mirror. UPDATE 2026-07-31, then again 2026-08-02: new builds
+    # keep landing upstream -- expected drift (module docstring), not a
+    # code bug.
+    assert result.version_string == "w1-28.1.49838.53220"
     assert result.version_string.startswith("w1-28.1.")
 
 
@@ -151,9 +159,9 @@ def test_list_major_versions_summarizes_by_major_minor(_mirror):
     assert "28.1" in major_minors
     assert "28.2" in major_minors
     entry = next(v for v in versions if v["major_minor"] == "28.1")
-    # UPDATE 2026-07-31: expected drift, see
+    # UPDATE 2026-07-31, then again 2026-08-02: expected drift, see
     # test_resolve_loose_major_minor_picks_single_highest_build above.
-    assert entry["latest_build"] == "w1-28.1.49838.53124"
+    assert entry["latest_build"] == "w1-28.1.49838.53220"
 
 
 def test_list_major_versions_returns_none_for_unknown_country(_mirror):
