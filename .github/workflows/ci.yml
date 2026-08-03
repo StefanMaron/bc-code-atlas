@@ -104,3 +104,40 @@ jobs:
       # about coverage a full import would need the real venv for.
       - name: chunker parses cleanly
         run: python3 -c "import ast; ast.parse(open('chunker/al_chunker.py').read()); ast.parse(open('chunker/mcp_http_server.py').read())"
+
+  search-daemon-persistence:
+    name: search daemon survives a restart without reprocessing (constitution Principle VIII)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # Only tools/cocoindex-code is needed here -- this job exercises the
+      # real daemon/CLI machinery + the real al_chunker plugin, not the
+      # multi-GB data/ corpora.
+      - name: Init tools/cocoindex-code submodule
+        run: git submodule update --init tools/cocoindex-code
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      # A routine deploy restarts the shared search daemon (systemd
+      # `KillMode=control-group`) -- constitution Principle VIII requires
+      # that restart to resume from on-disk state rather than reprocess the
+      # whole corpus from zero, or the ~30min build SLA this service exists
+      # for stops being meaningful (a deploy could silently trigger a
+      # multi-hour reindex). This test spins up the real daemon via
+      # `--with-editable chunker` (same overlay-venv wiring
+      # scripts/start-search-server.sh uses in production), indexes a real
+      # tiny AL corpus with the real al_chunker plugin, kills and respawns
+      # the daemon, and asserts the pre-restart files come back as
+      # `num_unchanged`, not reprocessed. If a future cocoindex-code bump,
+      # storage-layout change, or path-mapping change breaks resumption,
+      # this fails and blocks the merge.
+      - name: Run daemon persistence-across-restart test
+        run: |
+          uv run --project tools/cocoindex-code --with-editable chunker \
+            pytest chunker/tests/test_daemon_persistence.py -v
