@@ -1,10 +1,10 @@
 <!--
 Sync Impact Report
-- Version change: (none, template) → 1.0.0
-- Modified principles: n/a (first ratification)
-- Added sections: all (Core Principles I-VII, Technology & Data Constraints,
-  Development Workflow, Governance)
-- Removed sections: template placeholders only
+- Version change: 1.0.0 → 1.1.0
+- Modified principles: n/a
+- Added sections: Core Principle VIII (Deploys Must Not Reset the Serving
+  Index)
+- Removed sections: none
 - Templates requiring updates:
   - .specify/templates/plan-template.md ⚠ pending — its "Constitution Check"
     gate is generic; when the first real plan is generated, populate it with
@@ -19,8 +19,9 @@ Sync Impact Report
     needs a full rewrite in a follow-up step, not part of this amendment.
   - README.md ⚠ pending — "This is a proof of concept" framing and the
     single-version Quick Start are now stale; follow-up step.
-- Follow-up TODOs: none deferred — all placeholders resolved from the
-  session's architecture conclusions and repo history.
+- Follow-up TODOs: none deferred — Principle VIII's claim was directly
+  verified against the deployed code (not assumed) before being ratified;
+  see the principle's Rationale for the exact code paths checked.
 -->
 
 # bc-code-atlas Constitution
@@ -151,6 +152,51 @@ every caller compounds across the whole community, and a misleading tool
 description wastes calls at scale in a way a single local user would never
 notice.
 
+### VIII. Deploys Must Not Reset the Serving Index
+
+The shared search daemon's cold-start reindex (hours, not minutes — see
+"Key facts already established" in `CLAUDE.md`) MUST NEVER be an implicit
+side effect of a routine code deploy. A deploy is only permitted to restart
+the search-serving process when: (a) the process resumes from its existing
+on-disk state rather than reprocessing everything from zero, and (b) that
+resumption has been verified against the actual deployed code, not assumed.
+If a future change to `cocoindex-code`, its storage layout, or the deploy
+path (env var overrides, path mappings, container/ephemeral-disk moves)
+would break resumption, that change MUST NOT ship until an equivalent
+persistence guarantee is restored — deploys are otherwise something that
+happens constantly while operating this service (bug fixes, unrelated
+features), and an accidental full reset on every one of them makes the
+hosted VM approach itself infeasible, not just slow.
+
+**Rationale**: directly verified by reading the deployed
+`cocoindex-code` code (commit `7fe0e89`, identical on the VM and in this
+repo at the time of verification) rather than inferred from one lucky
+restart: `Project.create()`
+(`tools/cocoindex-code/src/cocoindex_code/project.py`) opens
+`cocoindex.db` (incremental-state tracking) and `target_sqlite.db` (vector
+index) at a deterministic, disk-backed path
+(`resolve_db_dir()`/`settings.py`, `project_root/.cocoindex_code/` with no
+env override configured on the VM) using `mkdir(..., exist_ok=True)` — it
+never creates fresh/empty stores on process start. `self._app.update()` is
+cocoindex's own content-hash-based incremental engine: it diffs current
+file content against what is already recorded in those persisted stores,
+so files already indexed by a now-dead process come back as
+`num_unchanged` (skipped) rather than being reprocessed. Live-measured
+confirmation: after a routine `systemctl restart` on the hosted VM,
+`num_unchanged` was already >10,000 immediately, not 0. This makes the
+earlier working assumption baked into `chunker/chunking.py`'s
+`CHUNKER_REGISTRY` comment and repeated through `CLAUDE.md` ("a fresh
+daemon process cannot trust ANY prior state") obsolete and due for
+correction there — that assumption was true of a *different* project root
+per (country, version) build artifact (each of those genuinely has no
+prior state the first time it's built), not of the one shared,
+long-lived, single-path serving daemon this principle is about. The one
+residual, not-yet-stress-tested risk: this reasoning assumes the on-disk
+LMDB/SQLite state survives an *ungraceful* kill (e.g. the stall watchdog's
+SIGKILL path) without corruption — both formats are designed to be
+crash-safe, but that specific scenario hasn't been directly reproduced and
+verified, only reasoned about from format guarantees.
+
 ## Technology & Data Constraints
 
 - **Source of truth**: `StefanMaron/MSDyn365BC.Sandbox.Code.History` — one
@@ -221,4 +267,4 @@ the proposed design against the Core Principles above, with any violation
 explicitly justified in that plan's Complexity Tracking section rather than
 silently accepted.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-02 | **Last Amended**: 2026-07-02
+**Version**: 1.1.0 | **Ratified**: 2026-07-02 | **Last Amended**: 2026-08-03

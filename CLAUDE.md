@@ -150,16 +150,33 @@ here since they're not principles, just measurements:
   slower than either the original ~30min estimate or the "well past 2
   hours" figure from earlier this session, and this is now measured with
   real IndexingProgress counters, not inferred from DB file size: ~39% of
-  ~24,300 files done after ~6 hours on the hosted VM's 4-vCPU hardware, in
-  a clean, single-daemon, non-thrashing run. This is a genuine, different
-  problem from the build-side one above (build reuses a warm sibling's
-  already-indexed `.cocoindex_code/` state; a fresh daemon process cannot
-  trust ANY prior state at all, warm or not — `chunker/chunking.py`'s
-  `CHUNKER_REGISTRY` comment). Don't assume this number is stable across
-  VM/corpus changes — re-measure via `project_status()`'s live counters
-  (`num_unchanged + num_reprocesses` vs. `total_files`) rather than
-  inferring from `target_sqlite.db`'s byte size, which was observed live
-  to plateau for very long stretches during genuine, healthy compute.
+  ~24,300 files done after ~6 hours, then ~55% after ~14 hours (a second
+  independent sample), on the hosted VM's 4-vCPU hardware. Don't assume
+  this number is stable across VM/corpus changes — re-measure via
+  `project_status()`'s live counters (`num_unchanged + num_reprocesses` vs.
+  `total_files`) rather than inferring from `target_sqlite.db`'s byte size,
+  which was observed live to plateau for very long stretches during
+  genuine, healthy compute.
+  **Correction (2026-08-03), see constitution Principle VIII**: the
+  earlier claim here that "a fresh daemon process cannot trust ANY prior
+  state at all" was wrong for this always-warm shared serving daemon
+  specifically (it remains true of a brand-new per-(country, version)
+  build artifact's *first* build, which genuinely has no prior state).
+  Verified directly against the deployed `cocoindex-code` source
+  (`tools/cocoindex-code/src/cocoindex_code/project.py`'s `Project.create`
+  + `resolve_db_dir()`/`settings.py`): the daemon's `.cocoindex_code/`
+  state (`cocoindex.db`, `target_sqlite.db`) lives at a deterministic,
+  disk-backed path that a fresh process reopens rather than recreates, and
+  `self._app.update()` is a content-hash-based incremental engine that
+  skips already-indexed files as `num_unchanged`. Live-confirmed: a
+  routine `systemctl restart` on the VM resumed with `num_unchanged` already
+  >10,000, not 0. **This means routine deploys do NOT have to cost a full
+  cold reindex** — the daemon survives a restart cheaply as long as its
+  on-disk `.cocoindex_code/` state isn't wiped and the project_root path
+  stays the same. The one open risk, not yet stress-tested: whether this
+  holds under an *ungraceful* kill (the stall watchdog's SIGKILL path),
+  vs. only the graceful SIGTERM restart path actually observed live so
+  far.
 - Cross-country content overlap is much higher than git ancestry suggests:
   `w1-28` vs `us-28` share ~87% byte-identical `.al` files at the same
   path (10,962 of 12,604 in `us-28`) despite the two branches having no
