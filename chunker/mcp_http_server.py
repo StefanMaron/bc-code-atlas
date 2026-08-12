@@ -372,6 +372,24 @@ def _kill_shared_daemon_hard() -> None:
     _daemon_client._daemon_ensured = False
 
 
+# Serializes every call to `_run_with_stall_recovery` process-wide. Without
+# this, issue #21's watch loop (specs/007-file-watcher-reindex) calls this
+# function on its own periodic schedule, independent of any particular
+# caller's request -- so a stall-triggered `_kill_shared_daemon_hard()`
+# below could land in the middle of an unrelated, concurrent `bcatlas_search`
+# call against the same daemon and fail it for a reason that has nothing to
+# do with that request (found in code review of this PR, not live-
+# reproduced). A single in-process lock around the whole call closes that
+# race the same way issue/PR #14 ("Serialize daemon-touching calls to close
+# a real startup race", not yet merged as of this change) proposes for a
+# related but distinct daemon-start race -- see that PR's description for
+# the fuller context this is a narrower instance of. The tradeoff this
+# accepts: a concurrent search now blocks for the (typically short, no-op-
+# fast per Principle VIII) duration of an in-progress reindex instead of
+# racing it -- graceful latency, not a hard failure.
+_DAEMON_CALL_LOCK = threading.Lock()
+
+
 def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
     """Run a blocking `cocoindex_code.client` call (`index`/`search`) to
     completion, recovering from the documented daemon stall above instead
@@ -389,51 +407,52 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
     picks back up from its on-disk LMDB/SQLite state within ~40s of a
     kill, re-embedding nothing already completed.
     """
-    for attempt in range(1, _MAX_STALL_RETRIES + 1):
-        outcome: dict[str, object] = {}
+    with _DAEMON_CALL_LOCK:
+        for attempt in range(1, _MAX_STALL_RETRIES + 1):
+            outcome: dict[str, object] = {}
 
-        def _target() -> None:
-            try:
-                outcome["result"] = fn()
-            except Exception as exc:  # noqa: BLE001 - re-raised on the caller's thread below
-                outcome["error"] = exc
+            def _target() -> None:
+                try:
+                    outcome["result"] = fn()
+                except Exception as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+                    outcome["error"] = exc
 
-        thread = threading.Thread(target=_target, daemon=True)
-        thread.start()
+            thread = threading.Thread(target=_target, daemon=True)
+            thread.start()
 
-        last_fp = _progress_signal(project_root)
-        last_progress = time.monotonic()
-        while thread.is_alive():
-            thread.join(timeout=_STALL_POLL_INTERVAL_S)
+            last_fp = _progress_signal(project_root)
+            last_progress = time.monotonic()
+            while thread.is_alive():
+                thread.join(timeout=_STALL_POLL_INTERVAL_S)
+                if not thread.is_alive():
+                    break
+                fp = _progress_signal(project_root)
+                now = time.monotonic()
+                if fp != last_fp:
+                    last_fp = fp
+                    last_progress = now
+                elif now - last_progress >= _STALL_TIMEOUT_S:
+                    break  # stalled -- fall through to kill+retry below
+
             if not thread.is_alive():
-                break
-            fp = _progress_signal(project_root)
-            now = time.monotonic()
-            if fp != last_fp:
-                last_fp = fp
-                last_progress = now
-            elif now - last_progress >= _STALL_TIMEOUT_S:
-                break  # stalled -- fall through to kill+retry below
+                if "error" in outcome:
+                    raise outcome["error"]  # type: ignore[misc]
+                return outcome["result"]  # type: ignore[return-value]
 
-        if not thread.is_alive():
-            if "error" in outcome:
-                raise outcome["error"]  # type: ignore[misc]
-            return outcome["result"]  # type: ignore[return-value]
-
-        # Stalled: the background thread is still blocked inside the
-        # daemon call (and stays abandoned -- daemon=True -- there is no
-        # way to cancel it; killing the daemon below unblocks it shortly
-        # after with an error, which is harmless since nothing reads
-        # `outcome` for this attempt anymore).
-        _kill_shared_daemon_hard()
-        if attempt == _MAX_STALL_RETRIES:
-            raise RuntimeError(
-                f"cocoindex daemon stalled {attempt} time(s) in a row on "
-                f"{project_root!r} with no on-disk progress for "
-                f"{_STALL_TIMEOUT_S:.0f}s each time -- giving up. See "
-                "~/.cocoindex_code/daemon.log."
-            )
-    raise AssertionError("unreachable")  # pragma: no cover
+            # Stalled: the background thread is still blocked inside the
+            # daemon call (and stays abandoned -- daemon=True -- there is no
+            # way to cancel it; killing the daemon below unblocks it shortly
+            # after with an error, which is harmless since nothing reads
+            # `outcome` for this attempt anymore).
+            _kill_shared_daemon_hard()
+            if attempt == _MAX_STALL_RETRIES:
+                raise RuntimeError(
+                    f"cocoindex daemon stalled {attempt} time(s) in a row on "
+                    f"{project_root!r} with no on-disk progress for "
+                    f"{_STALL_TIMEOUT_S:.0f}s each time -- giving up. See "
+                    "~/.cocoindex_code/daemon.log."
+                )
+        raise AssertionError("unreachable")  # pragma: no cover
 
 
 # --- multi-tenant routing (T028, specs/001-multi-version-serving) ---------
@@ -898,15 +917,26 @@ async def _serve(args: argparse.Namespace) -> None:
     mcp_server = create_filtered_mcp_server(args.project_root)
     mcp_server.settings.host = args.host
     mcp_server.settings.port = args.port
+    # Held in this local variable for _serve()'s whole lifetime (it's alive
+    # in this same frame through the `await` below) so asyncio never
+    # garbage-collects it mid-run -- per asyncio's own documented warning,
+    # a task with no reachable strong reference anywhere can be collected
+    # before it finishes, which would silently stop watch-mode reindexing
+    # with no error (found in code review of this PR, not live-reproduced).
+    watch_task: asyncio.Task[None] | None = None
     if args.watch_interval_seconds is not None:
-        asyncio.create_task(_watch_loop(args.project_root, args.watch_interval_seconds))
+        watch_task = asyncio.create_task(_watch_loop(args.project_root, args.watch_interval_seconds))
         print(
             f"watch mode enabled -- reindexing {args.project_root} every"
             f" {args.watch_interval_seconds}s",
             flush=True,
         )
     print(f"cocoindex-code MCP server (streamable-http) on http://{args.host}:{args.port}/mcp")
-    await mcp_server.run_streamable_http_async()
+    try:
+        await mcp_server.run_streamable_http_async()
+    finally:
+        if watch_task is not None:
+            watch_task.cancel()
 
 
 def main() -> None:

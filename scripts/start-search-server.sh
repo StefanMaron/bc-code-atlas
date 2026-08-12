@@ -52,9 +52,16 @@ if [ -n "${BCATLAS_WATCH_INTERVAL_SECONDS:-}" ]; then
     WATCH_ARGS=(--watch-interval-seconds "$BCATLAS_WATCH_INTERVAL_SECONDS")
 fi
 
+# `${WATCH_ARGS[@]+"${WATCH_ARGS[@]}"}`, not the bare `"${WATCH_ARGS[@]}"`
+# form: under `set -u`, expanding an empty array (the default, watch-mode-
+# off case) with the bare form raises "unbound variable" and aborts before
+# the server ever starts on bash versions older than 4.4 -- including
+# macOS's default /bin/bash 3.2.57 (found in code review of this PR, not
+# reproduced on this project's own Linux deployment target, but a real
+# regression for anyone running this script locally on an older bash).
 exec uv run --project "$ROOT/tools/cocoindex-code" --with-editable "$ROOT/chunker" \
     python "$ROOT/chunker/mcp_http_server.py" \
     "$SOURCE_DIR" \
     --host "${SEARCH_HOST:-127.0.0.1}" \
     --port "${SEARCH_PORT:-8801}" \
-    "${WATCH_ARGS[@]}"
+    ${WATCH_ARGS[@]+"${WATCH_ARGS[@]}"}
