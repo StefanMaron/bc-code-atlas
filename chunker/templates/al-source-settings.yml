@@ -1,0 +1,24 @@
+# AL-scoped cocoindex-code project settings template.
+#
+# Use this for a NEW local AL source directory you want the search service
+# to index (specs/005-local-source-directory, GitHub issue #18) -- it is
+# NOT used for the default `data/` corpus, which has its own
+# data/.cocoindex_code/settings.yml with Microsoft-corpus-specific test
+# exclusions that don't generalize to an arbitrary AL project.
+#
+# One-time setup for a custom directory:
+#   cd /path/to/your/al/source
+#   uv run --project <repo>/tools/cocoindex-code ccc init
+#   cp <repo>/chunker/templates/al-source-settings.yml .cocoindex_code/settings.yml
+#
+# Then point the search server at it via BCATLAS_SOURCE_DIR (see
+# scripts/start-search-server.sh and quickstart.md in the spec above).
+
+include_patterns:
+  - "**/*.al"
+exclude_patterns:
+  - "**/.git/**"
+  - "**/.cocoindex_code/**"
+chunkers:
+  - ext: al
+    module: al_chunker:al_chunker

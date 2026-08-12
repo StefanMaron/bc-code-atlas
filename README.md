@@ -159,6 +159,46 @@ cd data && uv run --project ../tools/cocoindex-code ccc index && cd ..
 transcripts of real queries run against a separate Claude Code session,
 matching CLAUDE.md's two validation scenarios).
 
+### Indexing a different local AL source directory
+
+`./scripts/start-search-server.sh` indexes `data/` (the default Microsoft BC
+corpus) unless `BCATLAS_SOURCE_DIR` is set, in which case it indexes that
+directory instead — useful for pointing the search service at your own AL
+project. One-time setup for a new directory:
+
+```bash
+cd /path/to/your/al/source
+uv run --project <repo>/tools/cocoindex-code ccc init
+cp <repo>/chunker/templates/al-source-settings.yml .cocoindex_code/settings.yml
+
+cd <repo>
+BCATLAS_SOURCE_DIR=/path/to/your/al/source ./scripts/start-search-server.sh
+```
+
+See `specs/005-local-source-directory/quickstart.md` for a full walkthrough.
+
+The MCP instructions text a connecting client sees, and the path-prefix list
+used to expand prefix-agnostic `bcatlas_search` filters, are also
+overridable per directory — add `<your-al-source>/.bcatlas/mcp_presentation.yml`:
+
+```yaml
+instructions: |
+  Semantic search over <your project> (not Microsoft Business Central).
+path_prefixes:
+  - src
+```
+
+Both keys are optional and independent of `BCATLAS_SOURCE_DIR` above; the
+default hosted BC corpus has no such file, so its behavior is unaffected.
+See `specs/006-configurable-mcp-instructions/quickstart.md` for details.
+
+For fast local iteration, `BCATLAS_WATCH_INTERVAL_SECONDS=<seconds>` (unset
+by default) makes the search server reindex `BCATLAS_SOURCE_DIR` in the
+background on that interval, so edits are searchable without an explicit
+refresh. Opt-in only — never set on the hosted default corpus unless an
+operator explicitly configures it there. See
+`specs/007-file-watcher-reindex/quickstart.md` for details.
+
 ## Connecting to the hosted instance
 
 The public instance is live at `https://bc-code-atlas.stefanmaron.dev/mcp` —

@@ -25,6 +25,26 @@ it generalizes to any query, not just the ones tested by hand.
 Usage:
     uv run --project /path/to/cocoindex-code python mcp_http_server.py \
         <project_root> [--host HOST] [--port PORT]
+
+`project_root` may point at any local directory of AL source, not only the
+default Microsoft BC corpus -- see specs/005-local-source-directory/ (issue
+#18). `scripts/start-search-server.sh` reads this from the optional
+BCATLAS_SOURCE_DIR env var. A directory indexed for the first time needs an
+AL-aware `.cocoindex_code/settings.yml` (run `ccc init`, then copy
+`chunker/templates/al-source-settings.yml` into it) or `.al` files won't get
+AL-specific chunking -- see that template file and
+specs/005-local-source-directory/quickstart.md for the full one-time setup.
+
+The MCP `instructions` text and search path-filter prefixes are also
+overridable per directory via `<project_root>/.bcatlas/mcp_presentation.yml`
+-- see specs/006-configurable-mcp-instructions/contracts/settings-file.md.
+Useful together with the above: a custom AL directory can get instructions
+that accurately describe it instead of the default Business Central text.
+
+`--watch-interval-seconds` (opt-in, off by default) reindexes project_root
+every N seconds in the background, so file changes are searchable without
+an explicit refresh -- see
+specs/007-file-watcher-reindex/contracts/watch-mode.md.
 """
 
 from __future__ import annotations
@@ -40,6 +60,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+import yaml
 from cocoindex_code.server import CodeChunkResult, SearchResultModel
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -507,12 +528,68 @@ def _expand_paths_for_corpus_prefixes(paths: list[str], prefixes: tuple[str, ...
     return expanded
 
 
+# Operator-configurable MCP instructions/path-filter-prefix override, relative
+# to `project_root` -- specs/006-configurable-mcp-instructions, issue #20.
+# Deliberately not part of cocoindex_code's own ProjectSettings/settings.yml
+# (constitution Principle VI -- that's vendored, unmodified); this is purely
+# presentational and belongs entirely in code this repo owns.
+_PRESENTATION_SETTINGS_REL_PATH = Path(".bcatlas") / "mcp_presentation.yml"
+
+
+def _load_presentation_settings(project_root: str) -> tuple[str, tuple[str, ...] | None]:
+    """Returns `(instructions, path_prefixes)`. `path_prefixes` is `None`
+    when not explicitly configured (caller falls back to
+    `_resolve_corpus_path_prefixes`'s dynamic detection) or a tuple
+    (possibly empty, meaning "no prefixes") when configured.
+
+    A missing settings file is not an error -- only a present-but-invalid
+    one is (FR-005), same fail-fast precedent as `_validate_project_root`.
+    """
+    settings_path = Path(project_root) / _PRESENTATION_SETTINGS_REL_PATH
+    if not settings_path.is_file():
+        return _MCP_INSTRUCTIONS, None
+
+    try:
+        raw = yaml.safe_load(settings_path.read_text())
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"error: invalid YAML in {settings_path}: {exc}") from exc
+
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise SystemExit(
+            f"error: {settings_path} must contain a YAML mapping at the top"
+            f" level, got {type(raw).__name__}"
+        )
+
+    instructions = raw.get("instructions", _MCP_INSTRUCTIONS)
+    if not isinstance(instructions, str):
+        raise SystemExit(
+            f"error: {settings_path}: 'instructions' must be a string, got"
+            f" {type(instructions).__name__}"
+        )
+
+    path_prefixes: tuple[str, ...] | None = None
+    if "path_prefixes" in raw:
+        raw_prefixes = raw["path_prefixes"]
+        if not isinstance(raw_prefixes, list) or not all(isinstance(p, str) for p in raw_prefixes):
+            raise SystemExit(f"error: {settings_path}: 'path_prefixes' must be a list of strings")
+        path_prefixes = tuple(raw_prefixes)
+
+    return instructions, path_prefixes
+
+
 def create_filtered_mcp_server(project_root: str) -> FastMCP:
     """Like cocoindex_code.server.create_mcp_server, plus test-path filtering."""
     from cocoindex_code import client as _client
 
-    mcp = FastMCP("cocoindex-code", instructions=_MCP_INSTRUCTIONS)
-    _corpus_path_prefixes = _resolve_corpus_path_prefixes(project_root)
+    _instructions, _configured_prefixes = _load_presentation_settings(project_root)
+    mcp = FastMCP("cocoindex-code", instructions=_instructions)
+    _corpus_path_prefixes = (
+        _configured_prefixes
+        if _configured_prefixes is not None
+        else _resolve_corpus_path_prefixes(project_root)
+    )
 
     @mcp.tool(
         name="bcatlas_search",
@@ -747,18 +824,111 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
     return mcp
 
 
+def _validate_project_root(project_root: str) -> None:
+    """Fail fast on a misconfigured AL source directory rather than starting
+    up with a silently empty index (specs/005-local-source-directory,
+    FR-004/FR-005 -- issue #18): a missing/non-directory path is a fatal
+    config error, but an existing directory with zero `.al` files just gets
+    a warning since an operator may intentionally point at a not-yet-
+    populated directory before adding source.
+    """
+    root = Path(project_root)
+    if not root.is_dir():
+        raise SystemExit(
+            f"error: configured AL source directory does not exist or is not"
+            f" a directory: {root}"
+        )
+    if not any(root.rglob("*.al")):
+        print(
+            f"warning: {root} contains no .al files -- the index will be"
+            " empty until AL source is added there.",
+            flush=True,
+        )
+
+
+def _validate_watch_interval(value: float | None) -> None:
+    """Fail fast on a nonsensical `--watch-interval-seconds` rather than
+    silently spinning a zero/negative-delay loop (specs/007-file-watcher-
+    reindex, FR-001 -- issue #21).
+    """
+    if value is not None and value <= 0:
+        raise SystemExit(
+            f"error: --watch-interval-seconds must be a positive number, got {value}"
+        )
+
+
+def _watch_reindex_once(project_root: str) -> None:
+    """One watch-mode reindex attempt -- the exact same hardened call path
+    `bcatlas_search`'s `refresh_index=True` already uses (research.md:
+    reuse the existing verified primitive rather than a new one).
+    """
+    from cocoindex_code import client as _client
+
+    _run_with_stall_recovery(lambda: _client.index(project_root), project_root)
+
+
+async def _watch_loop(
+    project_root: str,
+    interval_s: float,
+    reindex_once: Callable[[str], None] = _watch_reindex_once,
+) -> None:
+    """Background task: reindex `project_root` every `interval_s` seconds
+    for the lifetime of the server process (specs/007-file-watcher-reindex,
+    issue #21). All file changes landing within one interval are covered by
+    the single next reindex call -- coalescing (FR-005) falls out of this
+    for free, cocoindex's own incremental engine already processes every
+    changed file in one `update()` pass, not one pass per file. A failed
+    attempt is logged and the loop keeps going (FR-006) rather than crashing
+    the server or silently going stale forever; `reindex_once` is injectable
+    so tests can exercise this without a real daemon.
+    """
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await loop.run_in_executor(None, reindex_once, project_root)
+        except Exception as exc:  # noqa: BLE001 - logged and retried, never fatal
+            print(
+                f"warning: watch-mode reindex of {project_root} failed: {exc}",
+                flush=True,
+            )
+
+
+async def _serve(args: argparse.Namespace) -> None:
+    mcp_server = create_filtered_mcp_server(args.project_root)
+    mcp_server.settings.host = args.host
+    mcp_server.settings.port = args.port
+    if args.watch_interval_seconds is not None:
+        asyncio.create_task(_watch_loop(args.project_root, args.watch_interval_seconds))
+        print(
+            f"watch mode enabled -- reindexing {args.project_root} every"
+            f" {args.watch_interval_seconds}s",
+            flush=True,
+        )
+    print(f"cocoindex-code MCP server (streamable-http) on http://{args.host}:{args.port}/mcp")
+    await mcp_server.run_streamable_http_async()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("project_root")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8801)
+    parser.add_argument(
+        "--watch-interval-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Opt-in: reindex project_root every N seconds in the background,"
+            " so changes are searchable without an explicit refresh (issue"
+            " #21). Disabled (today's on-demand-only behavior) unless set."
+        ),
+    )
     args = parser.parse_args()
 
-    mcp_server = create_filtered_mcp_server(args.project_root)
-    mcp_server.settings.host = args.host
-    mcp_server.settings.port = args.port
-    print(f"cocoindex-code MCP server (streamable-http) on http://{args.host}:{args.port}/mcp")
-    asyncio.run(mcp_server.run_streamable_http_async())
+    _validate_project_root(args.project_root)
+    _validate_watch_interval(args.watch_interval_seconds)
+    asyncio.run(_serve(args))
 
 
 if __name__ == "__main__":

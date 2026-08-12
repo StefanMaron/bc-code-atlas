@@ -141,3 +141,25 @@ jobs:
         run: |
           uv run --project tools/cocoindex-code --with-editable chunker \
             pytest chunker/tests/test_daemon_persistence.py -v
+
+      # Same job/venv (needs the real cocoindex-code import, same as above)
+      # -- covers the startup validation for a configurable local AL source
+      # directory (specs/005-local-source-directory, issue #18).
+      - name: Run source-directory validation tests
+        run: |
+          uv run --project tools/cocoindex-code --with-editable chunker \
+            pytest chunker/tests/test_source_dir_validation.py -v
+
+      # Same job/venv again -- covers configurable MCP instructions/path
+      # filtering (specs/006-configurable-mcp-instructions, issue #20).
+      - name: Run MCP presentation-settings tests
+        run: |
+          uv run --project tools/cocoindex-code --with-editable chunker \
+            pytest chunker/tests/test_presentation_settings.py -v
+
+      # Same job/venv again -- covers opt-in continuous reindexing
+      # (specs/007-file-watcher-reindex, issue #21).
+      - name: Run watch-mode tests
+        run: |
+          uv run --project tools/cocoindex-code --with-editable chunker \
+            pytest chunker/tests/test_watch_mode.py -v

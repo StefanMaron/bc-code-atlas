@@ -38,8 +38,23 @@ export HF_HUB_OFFLINE=1
 # get silently pruned back out by the next `uv sync --project
 # tools/cocoindex-code` (every deploy runs one) since it's not a locked
 # dependency of the vendored project.
+# Optional override so this can index any local AL source directory instead
+# of the default Microsoft BC corpus (specs/005-local-source-directory,
+# issue #18) -- unset (the default) keeps today's behavior unchanged.
+SOURCE_DIR="${BCATLAS_SOURCE_DIR:-$ROOT/data}"
+
+# Optional opt-in continuous reindexing (specs/007-file-watcher-reindex,
+# issue #21) -- unset (the default) keeps today's on-demand-only behavior,
+# and in particular is never set on the hosted default corpus unless an
+# operator explicitly configures it there.
+WATCH_ARGS=()
+if [ -n "${BCATLAS_WATCH_INTERVAL_SECONDS:-}" ]; then
+    WATCH_ARGS=(--watch-interval-seconds "$BCATLAS_WATCH_INTERVAL_SECONDS")
+fi
+
 exec uv run --project "$ROOT/tools/cocoindex-code" --with-editable "$ROOT/chunker" \
     python "$ROOT/chunker/mcp_http_server.py" \
-    "$ROOT/data" \
+    "$SOURCE_DIR" \
     --host "${SEARCH_HOST:-127.0.0.1}" \
-    --port "${SEARCH_PORT:-8801}"
+    --port "${SEARCH_PORT:-8801}" \
+    "${WATCH_ARGS[@]}"
