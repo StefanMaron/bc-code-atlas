@@ -298,7 +298,16 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
         depth: int = Field(default=3, description="Traversal depth (1-6)"),
         token_budget: int = Field(default=6000, description="Max output tokens"),
         context_filter: list[str] | None = Field(
-            default=None, description="Optional explicit edge-context filter, e.g. ['call', 'field']"
+            default=None,
+            description=(
+                "Optional explicit edge-context filter, e.g. ['call', 'field']."
+                " Also accepts 'cross_app', a structural filter (not a"
+                " relation kind) that keeps only edges whose two endpoints"
+                " belong to different apps (AL corpora only) -- combine it"
+                " with a relation kind (e.g. ['cross_app', 'call']) to see"
+                " only cross-app calls, or use it alone for every cross-app"
+                " edge regardless of kind."
+            ),
         ),
         country: str | None = Field(
             default=None,
@@ -355,6 +364,43 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
         ),
     ) -> Any:
         return await _forward(graph_url, "bcatlas_get_node", {"label": label, "country": country, "version": version})
+
+    @mcp.tool(
+        name="bcatlas_find_by_global_id",
+        description=(
+            "Cross-graph federation lookup: find the node(s) on a graph"
+            " matching a `global_id` value copied from another graph's"
+            " bcatlas_get_node output. `global_id` is a deterministic join"
+            " key stamped on every AL node (real objects and external stubs"
+            " alike), so a stub for object X in one corpus and the real X"
+            " node in its own corpus share the same value -- use this to"
+            " bridge two independently-hosted graphs at query time."
+        ),
+    )
+    async def find_by_global_id(
+        global_id: str = Field(description="global_id value to look up, e.g. from another graph's bcatlas_get_node output"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(
+            graph_url,
+            "bcatlas_find_by_global_id",
+            {"global_id": global_id, "country": country, "version": version},
+        )
 
     @mcp.tool(
         name="bcatlas_get_neighbors",

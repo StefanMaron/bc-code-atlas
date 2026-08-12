@@ -19,6 +19,15 @@ between two BC concepts.
 EOF
 )}"
 
+# graphify-al's own safety cap on graph.json (guards against loading a
+# runaway/corrupt file) defaults to 512MB. The default w1-28 corpus's real
+# graph.json crossed that after the #26/#27 rebuild (~707MB -- global_id/
+# al_owning_app on every AL node, plus ordinary upstream corpus growth since
+# the last rebuild) and the service crash-looped on every restart until this
+# was raised (confirmed live). 1GB leaves real headroom for continued
+# organic growth without disabling the cap outright.
+export GRAPHIFY_MAX_GRAPH_BYTES="${GRAPHIFY_MAX_GRAPH_BYTES:-1GB}"
+
 cd "$ROOT/tools/graphify-al"
 exec uv run --extra al python -m graphify.serve \
     "$ROOT/data/w1-28-src/graphify-out/graph.json" \
