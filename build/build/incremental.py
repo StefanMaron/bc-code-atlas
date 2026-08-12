@@ -366,6 +366,38 @@ def _index_state_fingerprint(search_dir: Path) -> tuple[int, int]:
     return (total, newest)
 
 
+def _daemon_cpu_ticks(runtime_dir: Path) -> int | None:
+    """Total (utime+stime) CPU jiffies for this build's own isolated `ccc`
+    daemon, read directly from `/proc/<pid>/stat` (Linux-only, matches this
+    project's only deployment target -- no new dependency needed). `None`
+    if `daemon.pid` doesn't exist yet or the `/proc` entry isn't readable
+    (daemon not up yet, or a permission/race hiccup -- best-effort).
+
+    Same fix as `chunker/mcp_http_server.py`'s identically-named function
+    (added there after an earlier live-reproduced instance of this exact
+    false-stall pattern on the search-serving side), ported here after
+    live-reproducing it again on the build side (this session, retrying a
+    genuinely cold build -- no warm sibling to reuse -- for a country never
+    indexed before): the isolated per-build daemon spent its first several
+    minutes loading the embedding model and starting its first large
+    embedding batch, writing nothing under `.cocoindex_code/` the whole
+    time, while `ps`/`/proc` directly confirmed it was burning 200%+ CPU,
+    not idle. The on-disk fingerprint alone can't distinguish that from the
+    real, documented upstream hang (`daemon.py`'s "every thread sleeping,
+    zero CPU accrual" bug, Principle VI, out of reach here) this watchdog
+    exists to catch -- a daemon burning CPU is by definition not that.
+    """
+    try:
+        pid = int((runtime_dir / "daemon.pid").read_text().strip())
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()
+        # After the last ")" (closes the process name): field 0 is state,
+        # fields 11/12 (0-indexed from there) are utime/stime in clock
+        # ticks (man proc(5)) -- same field math as the chunker-side twin.
+        return int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _kill_daemon_by_pidfile(runtime_dir: Path) -> None:
     """SIGTERM -> SIGKILL the per-build `ccc run-daemon` via its own
     `daemon.pid` file. Deliberately NOT `ccc daemon stop`: its graceful
@@ -520,6 +552,7 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
                     start_new_session=True,
                 )
             last_fp = attempt_start_fp
+            last_cpu = _daemon_cpu_ticks(runtime_dir)
             last_progress = time.monotonic()
             stalled = False
             while True:
@@ -530,8 +563,10 @@ def _run_ccc_index(search_dir: Path, init_if_needed: bool) -> None:
                     pass
                 now = time.monotonic()
                 fp = _index_state_fingerprint(search_dir)
-                if fp != last_fp:
+                cpu = _daemon_cpu_ticks(runtime_dir)
+                if fp != last_fp or (cpu is not None and cpu != last_cpu):
                     last_fp = fp
+                    last_cpu = cpu
                     last_progress = now
                 elif now - last_progress >= _CCC_STALL_TIMEOUT_S:
                     stalled = True
