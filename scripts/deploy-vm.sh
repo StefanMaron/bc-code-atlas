@@ -27,7 +27,15 @@ main() {
   echo "==> git pull"
   git fetch --quiet origin master
   git reset --hard origin/master
-  git submodule update --init --recursive
+  # --force: a submodule's own uv.lock routinely gets rewritten in place by
+  # `uv sync`/`uv run` below (a benign self-referencing version-stamp drift,
+  # not a real dependency change -- confirmed live, harmless to discard) --
+  # without --force, `git submodule update` refuses to check out the new
+  # pinned commit whenever that drift is present, aborting the whole deploy
+  # under `set -e` before `systemctl restart` ever runs (confirmed live: PR
+  # #28's deploy failed exactly this way, leaving the VM on the prior
+  # commit's code with no restart attempted).
+  git submodule update --init --recursive --force
 
   echo "==> uv sync (all subprojects)"
   for p in tools/cocoindex-code chunker aggregator registry build; do
