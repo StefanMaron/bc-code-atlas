@@ -153,15 +153,16 @@ def bump_submodule_pointer(
         ["git", "update-index", "--cacheinfo", f"160000,{target_sha},{submodule.path}"],
         cwd=repo_root,
     )
+    # Deliberately no trailing pathspec here: `git commit -- <path>` re-adds
+    # the path from the WORKING TREE before committing (like `git add -u
+    # <path>`), which silently overwrites the gitlink bump just staged via
+    # `update-index --cacheinfo` with a deletion, since the submodule's
+    # content was never checked out (submodules: false) -- confirmed live
+    # against a real run of this workflow. Committing with no pathspec
+    # commits exactly what's staged in the index, which is the one change
+    # made above.
     _run(
-        [
-            "git",
-            "commit",
-            "-m",
-            f"[auto] Bump {submodule.path} to {target_sha[:7]}",
-            "--",
-            submodule.path,
-        ],
+        ["git", "commit", "-m", f"[auto] Bump {submodule.path} to {target_sha[:7]}"],
         cwd=repo_root,
     )
 
