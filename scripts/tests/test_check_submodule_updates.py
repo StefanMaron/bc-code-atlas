@@ -15,6 +15,29 @@ from scripts import check_submodule_updates as csu
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _init_repo_with_gitlink(root: Path, submodule_path: str, initial_sha: str) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "master", str(root)], check=True)
+    # Local repo config (not just -c flags per-call) so later commits made by
+    # bump_submodule_pointer's own `_run` calls -- which don't pass -c --
+    # succeed even on a runner with no global git identity configured.
+    subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-q", "-m", "init"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{initial_sha},{submodule_path}"],
+        cwd=root, check=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "add gitlink"], cwd=root, check=True)
+
+
+def _gitlink_sha(root: Path, submodule_path: str) -> str:
+    result = subprocess.run(
+        ["git", "ls-tree", "HEAD", "--", submodule_path],
+        cwd=root, capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip().split()[2]
+
+
 # --- T009: plan_action ------------------------------------------------------
 
 def test_plan_action_no_drift_is_none():
@@ -33,21 +56,41 @@ def test_plan_action_drift_with_open_pr_is_none():
 # --- T010: derive_branch_name ------------------------------------------------
 
 def test_derive_branch_name_differs_by_target_sha():
-    a = csu.derive_branch_name("data/w1-28-src", "1111111111111111111111111111111111aaaa")
-    b = csu.derive_branch_name("data/w1-28-src", "2222222222222222222222222222222222bbbb")
+    a = csu.derive_branch_name("data/w1-28-src", "111111111111111111111111111111111111aaaa")
+    b = csu.derive_branch_name("data/w1-28-src", "222222222222222222222222222222222222bbbb")
     assert a != b
 
 
 def test_derive_branch_name_is_deterministic():
-    a = csu.derive_branch_name("data/docs", "1111111111111111111111111111111111aaaa")
-    b = csu.derive_branch_name("data/docs", "1111111111111111111111111111111111aaaa")
+    a = csu.derive_branch_name("data/docs", "111111111111111111111111111111111111aaaa")
+    b = csu.derive_branch_name("data/docs", "111111111111111111111111111111111111aaaa")
     assert a == b
 
 
 def test_derive_branch_name_shape():
-    name = csu.derive_branch_name("data/docs-devitpro", "1111111111111111111111111111111111aaaa")
+    name = csu.derive_branch_name("data/docs-devitpro", "111111111111111111111111111111111111aaaa")
     assert name.startswith("bot/bump-data-docs-devitpro-")
     assert name.endswith("1111111")
+
+
+# --- Regression: bump_submodule_pointer must not lose the gitlink change ---
+# when the submodule's own content isn't checked out (`submodules: false`,
+# this workflow's real posture) -- caught live in the first real
+# workflow_dispatch run of this feature: `git commit -- <path>` re-derives
+# the change from the working tree (which has no such path checked out) and
+# silently commits a deletion instead of the staged gitlink bump.
+
+def test_bump_submodule_pointer_commits_gitlink_not_deletion(tmp_path):
+    submodule_path = "data/w1-28-src"
+    old_sha = "111111111111111111111111111111111111aaaa"
+    new_sha = "222222222222222222222222222222222222bbbb"
+    repo = tmp_path / "repo"
+    _init_repo_with_gitlink(repo, submodule_path, old_sha)
+
+    submodule = csu.WatchedSubmodule(path=submodule_path, upstream_url="unused", branch="unused")
+    csu.bump_submodule_pointer(submodule, new_sha, "bot/bump-test", repo_root=repo)
+
+    assert _gitlink_sha(repo, submodule_path) == new_sha
 
 
 # --- T019: per-submodule independence ---------------------------------------
@@ -62,7 +105,7 @@ def test_watched_submodules_cover_exactly_the_three_in_scope():
 
 def test_each_watched_submodule_gets_its_own_branch_name():
     # FR-003: never bundle two submodules into one PR/branch.
-    target_sha = "3333333333333333333333333333333333cccc"
+    target_sha = "333333333333333333333333333333333333cccc"
     names = {csu.derive_branch_name(s.path, target_sha) for s in csu.WATCHED_SUBMODULES}
     assert len(names) == len(csu.WATCHED_SUBMODULES)
 
