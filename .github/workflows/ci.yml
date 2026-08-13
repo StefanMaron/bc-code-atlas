@@ -20,7 +20,7 @@ jobs:
         # aggregator/ and chunker/ have no test suite yet -- not included
         # here because a "passing" CI job with zero tests collected would
         # be misleading, not because they're exempt from ever needing one.
-        project: [registry, build, tools/graphify-al]
+        project: [registry, build, tools/graphify-al, scripts]
     steps:
       - uses: actions/checkout@v4
         with:

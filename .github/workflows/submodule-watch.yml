@@ -1,0 +1,58 @@
+name: Submodule Watch
+
+# Detects when the real upstream mirrors for the three data submodules
+# backing the always-warm default corpus (data/w1-28-src, data/docs,
+# data/docs-devitpro) have advanced past what's currently pinned, and opens
+# one pull request per advanced submodule -- never merges anything (spec
+# 008-reindex-webhook FR-005). Opened PRs ride the existing CI -> merge ->
+# deploy.yml pipeline unchanged.
+
+on:
+  schedule:
+    # Daily -- a reasonable default cadence, not user-facing (spec.md
+    # Assumptions). Runs at 06:00 UTC to avoid exact-hour contention with
+    # other scheduled jobs on GitHub's shared runners.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+# Only what's needed to open a PR -- deliberately NOT merge-capable, this is
+# the actual safety gate for FR-005/User Story 3, not just the absence of a
+# merge call in the script (defense in depth).
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: submodule-watch
+  cancel-in-progress: false
+
+jobs:
+  check-and-propose:
+    name: Check upstream mirrors and propose bumps
+    runs-on: ubuntu-latest
+    steps:
+      # No submodule checkout -- the job only ever reads gitlink shas via
+      # `git ls-tree` and upstream tips via `git ls-remote`, never the
+      # multi-GB data/ corpora themselves (matches ci.yml's existing
+      # submodules: false posture).
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync scripts
+        run: uv sync --project scripts
+
+      - name: Check upstream mirrors and propose bumps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: uv run --project scripts python scripts/check_submodule_updates.py

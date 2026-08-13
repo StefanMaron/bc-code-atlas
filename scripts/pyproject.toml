@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bc-code-atlas-scripts"
+version = "0.1.0"
+description = "Repo-maintenance scripts (not a served MCP backend) -- currently: detecting and proposing default-corpus submodule bumps"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: real, network-dependent tests against the live upstream repos (run with `pytest`, skip with `pytest -m \"not network\"`)",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
