@@ -348,7 +348,15 @@ fast enough to run directly on CPU.
   submodules pointing at their real upstreams/forks. `tools/graphify-al`
   points at a fork branch (`StefanMaron/graphify-al@bc-code-atlas-fixes`)
   with real bug fixes found while building this PoC (directed-graph
-  traversal, ranking) — see REPORT.md finding #7.
+  traversal, ranking) — see REPORT.md finding #7. `data/w1-28-src`,
+  `data/docs`, and `data/docs-devitpro`'s pointers are kept current
+  automatically: a scheduled workflow
+  (`.github/workflows/submodule-watch.yml`) opens a pull request whenever
+  one of their real upstream mirrors has advanced, but never merges one
+  itself — it still goes through the same CI-gated human merge as any other
+  submodule bump. `tools/graphify-al` is intentionally excluded from this
+  automation (it's a vendored fork with its own manual review/port
+  workflow, not a passive upstream pull).
 - **Generated index data is gitignored** — the SQLite DBs under
   `data/.cocoindex_code/` and every `graphify-out/graph.json` are rebuilt
   locally per the Quick Start above, not committed. The multi-version

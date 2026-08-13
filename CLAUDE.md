@@ -119,9 +119,15 @@ confirmed via `bcatlas_version_status` and the promoted artifact on disk.
   (bc-al-chunker) real ones, which the daemon these subprocesses spawn
   inherits too (it locates its own `ccc` executable via
   `Path(sys.executable).parent`).
-- Reindex-webhook wiring into the sandbox-history repo's own GitHub
-  Actions is still not built — tracked as future work, the build/serve
-  split it would wire into now exists.
+- ~~Reindex-webhook wiring into the sandbox-history repo's own GitHub
+  Actions is still not built~~ — closed by spec `008-reindex-webhook`:
+  `.github/workflows/submodule-watch.yml` + `scripts/check_submodule_updates.py`
+  detect real upstream advancement on `data/w1-28-src`, `data/docs`, and
+  `data/docs-devitpro` and open a bump PR per advanced submodule, never
+  merging one itself — the same CI-gated human-merge flow as a hand-made
+  bump. `tools/graphify-al` is deliberately out of scope for this
+  automation (see its own "Checklist: bumping tools/graphify-al" section
+  above — that stays a manual port workflow).
 
 ## Key facts already established — don't re-derive
 
@@ -233,13 +239,11 @@ change its MCP tool surface) and before opening/merging that PR:
 - Don't try to fix or extend `graphify-al`'s partial call-resolution
   (event-driven/interface dispatch isn't followed statically) — documented
   upstream limitation, not a bug to chase (constitution Principle VI).
-- Reindex-webhook wiring into the sandbox-history repo's own GitHub Actions
-  is not yet built — the build/serve split it would wire into now exists
-  (see "Known open items" above), still tracked as future work, not
-  excluded forever.
+- ~~Reindex-webhook wiring into the sandbox-history repo's own GitHub
+  Actions is not yet built~~ — closed, see "Known open items" above.
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/007-file-watcher-reindex/plan.md
+at specs/008-reindex-webhook/plan.md
 <!-- SPECKIT END -->
