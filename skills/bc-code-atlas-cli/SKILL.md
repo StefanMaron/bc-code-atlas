@@ -27,7 +27,7 @@ single script.
 node <skill-dir>/bc-code-atlas.js <command> [args...] [--flag value] [--json]
 ```
 
-Run with `--help` for the full command list. All 17 upstream `bcatlas_*` tools are
+Run with `--help` for the full command list. All 18 upstream `bcatlas_*` tools are
 covered, one subcommand each (dashes instead of underscores, `bcatlas_` prefix
 dropped):
 
@@ -37,7 +37,7 @@ dropped):
 
 **Structural graph**
 - `query-graph <question> [--mode bfs|dfs] [--depth N]` — broad BFS/DFS graph search
-- `get-node <label>` / `get-neighbors <label> [--relation-filter R]`
+- `get-node <label>` / `resolve-node <object_type> <object_name> [--member M]` (deterministic — prefer this over `get-node` when you know the object type) / `get-neighbors <label> [--relation-filter R]`
 - `get-community <community_id>` / `god-nodes [--top-n N]` / `graph-stats` / `shortest-path <source> <target>`
 
 **Multi-version/country registry & build**

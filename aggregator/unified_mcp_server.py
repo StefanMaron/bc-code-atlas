@@ -92,13 +92,17 @@ _AGGREGATOR_INSTRUCTIONS = (
     " object/procedure name, skip straight to step 3 instead -- it's exact"
     " and cheaper than searching for something you can already name."
     "\n"
-    "2. `bcatlas_query_graph`, `bcatlas_get_node`, `bcatlas_get_neighbors`, `bcatlas_get_community`,"
+    "2. `bcatlas_query_graph`, `bcatlas_get_node`, `bcatlas_resolve_node`,"
+    " `bcatlas_get_neighbors`, `bcatlas_get_community`,"
     " `bcatlas_god_nodes`, `bcatlas_graph_stats`, `bcatlas_shortest_path` -- the exact structural"
     " relationship graph (objects, procedures, event subscriptions,"
     " extension targets) with real call/subscribe/extend edges extracted"
     " from source. Use these once you have a concrete node to trace: what"
     " calls or subscribes to it, what it extends, or how two BC concepts"
-    " connect."
+    " connect. Prefer `bcatlas_resolve_node` over `bcatlas_get_node` whenever"
+    " you already know the object type -- `bcatlas_get_node` is a fuzzy label"
+    " match and can return a same-named page control instead of the table"
+    " field you meant."
     "\n"
     "3. `bcatlas_get_signature`, `bcatlas_get_procedure_body`, `bcatlas_get_object_source` -- exact"
     " source text re-read from the real source files for a node the previous"
@@ -364,6 +368,58 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
         ),
     ) -> Any:
         return await _forward(graph_url, "bcatlas_get_node", {"label": label, "country": country, "version": version})
+
+    @mcp.tool(
+        name="bcatlas_resolve_node",
+        description=(
+            "Deterministically resolve a BC object/procedure to its canonical"
+            " node ID. Pass the object type (table, page, codeunit, report,"
+            " enum, tableextension, ...), the object name, and optionally a"
+            " member (field, procedure or trigger name). Returns the matching"
+            " node IDs with source anchors -- feed an ID into"
+            " bcatlas_get_neighbors to traverse. PREFER this over"
+            " bcatlas_get_node whenever you know what kind of thing you are"
+            " looking for (bcatlas_get_node is fuzzy and may return a"
+            " similarly named page control instead of the table)."
+        ),
+    )
+    async def resolve_node(
+        object_type: str = Field(description="AL object type, e.g. 'table', 'page', 'codeunit'"),
+        object_name: str = Field(description="Object name, e.g. 'VAT Posting Setup'"),
+        member: str | None = Field(
+            default=None,
+            description="Optional field/procedure/trigger name, e.g. 'VAT Calculation Type' or 'FailIfVATPostingSetupHasVATEntries'",
+        ),
+        limit: int = Field(default=10, description="Max results"),
+        country: str | None = Field(
+            default=None,
+            description=(
+                "Country code (e.g. 'w1', 'us') for a specific (country,"
+                " version) pair's graph instead of the default. Must be"
+                " paired with `version`."
+            ),
+        ),
+        version: str | None = Field(
+            default=None,
+            description=(
+                "Exact `commit_sha` (NOT `version_string`) from"
+                " bcatlas_resolve_version/bcatlas_request_version, paired"
+                " with `country`."
+            ),
+        ),
+    ) -> Any:
+        return await _forward(
+            graph_url,
+            "bcatlas_resolve_node",
+            {
+                "object_type": object_type,
+                "object_name": object_name,
+                "member": member,
+                "limit": limit,
+                "country": country,
+                "version": version,
+            },
+        )
 
     @mcp.tool(
         name="bcatlas_find_by_global_id",
