@@ -15,8 +15,15 @@ from scripts import check_submodule_updates as csu
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _init_repo_with_gitlink(root: Path, submodule_path: str, initial_sha: str) -> None:
-    subprocess.run(["git", "init", "-q", "-b", "master", str(root)], check=True)
+def _init_repo_with_gitlink(root: Path, submodule_path: str, initial_sha: str) -> Path:
+    """Sets up `root` as a real clone of a real bare `origin` remote (needed
+    since bump_submodule_pointer fetches/branches off `origin/<BASE_BRANCH>`),
+    with one committed gitlink for `submodule_path`. Returns the bare
+    origin's path.
+    """
+    origin = root.parent / f"{root.name}-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(root)], check=True)
     # Local repo config (not just -c flags per-call) so later commits made by
     # bump_submodule_pointer's own `_run` calls -- which don't pass -c --
     # succeed even on a runner with no global git identity configured.
@@ -28,6 +35,8 @@ def _init_repo_with_gitlink(root: Path, submodule_path: str, initial_sha: str) -
         cwd=root, check=True,
     )
     subprocess.run(["git", "commit", "-q", "-m", "add gitlink"], cwd=root, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "master"], cwd=root, check=True)
+    return origin
 
 
 def _gitlink_sha(root: Path, submodule_path: str) -> str:
@@ -91,6 +100,44 @@ def test_bump_submodule_pointer_commits_gitlink_not_deletion(tmp_path):
     csu.bump_submodule_pointer(submodule, new_sha, "bot/bump-test", repo_root=repo)
 
     assert _gitlink_sha(repo, submodule_path) == new_sha
+
+
+# --- Regression: bumping two submodules in one run must not bundle them ----
+# (FR-003) -- caught live in this feature's first real multi-submodule run:
+# `git checkout -B branch_name` (no explicit start point) branches off
+# whatever's currently checked out, which after processing the first
+# submodule is that submodule's own just-created bump branch, not the base
+# branch -- so the second submodule's PR silently included the first
+# submodule's change too.
+
+def test_bump_submodule_pointer_branches_are_independent(tmp_path):
+    sub_a_path, sub_b_path = "data/w1-28-src", "data/docs"
+    sub_a_old, sub_b_old = "111111111111111111111111111111111111aaaa", "444444444444444444444444444444444444dddd"
+    sub_a_new, sub_b_new = "222222222222222222222222222222222222bbbb", "555555555555555555555555555555555555eeee"
+    repo = tmp_path / "repo"
+    origin = _init_repo_with_gitlink(repo, sub_a_path, sub_a_old)
+    # Second submodule's initial gitlink, committed and pushed the same way.
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{sub_b_old},{sub_b_path}"],
+        cwd=repo, check=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "add second gitlink"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "master"], cwd=repo, check=True)
+
+    sub_a = csu.WatchedSubmodule(path=sub_a_path, upstream_url="unused", branch="unused")
+    sub_b = csu.WatchedSubmodule(path=sub_b_path, upstream_url="unused", branch="unused")
+
+    # Simulate main()'s loop: bump A, then (without resetting to origin/master
+    # by hand -- that's exactly what bump_submodule_pointer must do itself)
+    # bump B on a second branch in the same working copy.
+    csu.bump_submodule_pointer(sub_a, sub_a_new, "bot/bump-a", repo_root=repo)
+    csu.bump_submodule_pointer(sub_b, sub_b_new, "bot/bump-b", repo_root=repo)
+
+    files_changed = subprocess.run(
+        ["git", "diff", "--name-only", "master", "bot/bump-b"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert files_changed == [sub_b_path]
 
 
 # --- T019: per-submodule independence ---------------------------------------
