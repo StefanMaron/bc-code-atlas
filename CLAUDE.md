@@ -196,6 +196,38 @@ here since they're not principles, just measurements:
   dynamic/runtime discovery, complementary but out of scope for a static
   index. Don't re-evaluate unless the two layers above prove insufficient.
 
+## Checklist: bumping `tools/graphify-al` (new/changed MCP tool)
+
+`tools/graphify-al`'s `graphify/serve.py` is a vendored fork's serving
+layer — it is NOT what clients talk to. `aggregator/unified_mcp_server.py`
+re-declares every tool it forwards by name (`@mcp.tool(name="bcatlas_...")`,
+manual `_forward(...)` call) rather than proxying the backend's tool list
+transparently, and `skills/bc-code-atlas-cli/bc-code-atlas.js` separately
+hardcodes its own `COMMANDS` table (one entry per tool) plus a matching
+`printHelp()` line. **Neither of those is auto-derived from graphify-al's
+tool list — a new or renamed `bcatlas_*` tool added upstream (or in a local
+graphify-al fix) does not reach real clients until both are updated by
+hand.** This bit us for real: `bcatlas_resolve_node` was added to
+graphify-al, bumped into this repo, deployed, and verified live on the VM
+— but was unreachable through the public aggregator and missing from the
+shipped CLI skill until caught by a follow-up question, not by any
+automated check.
+
+Whenever you bump the `tools/graphify-al` submodule pointer (or otherwise
+change its MCP tool surface) and before opening/merging that PR:
+
+1. Diff the tool names: `grep -n 'name="bcatlas_' tools/graphify-al/graphify/serve.py`
+   vs. `grep -n 'name="bcatlas_' aggregator/unified_mcp_server.py` — every
+   graph-backend tool name must appear in both, and any renamed/removed
+   tool must be updated/removed in the aggregator too (not just added).
+2. Update `skills/bc-code-atlas-cli/bc-code-atlas.js`'s `COMMANDS` table
+   and `printHelp()` text, and `skills/bc-code-atlas-cli/SKILL.md`'s tool
+   list and tool-count callout, to match.
+3. There is currently no automated test enforcing this parity (the CI
+   "smoke-import" job only checks the aggregator imports, not that its
+   tool list is complete) — until one exists, this is a manual step, not
+   optional because CI stayed green.
+
 ## Non-goals (current)
 
 - Don't try to fix or extend `graphify-al`'s partial call-resolution

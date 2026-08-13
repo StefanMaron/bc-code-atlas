@@ -98,6 +98,11 @@ const COMMANDS = {
     optional: ['mode', 'depth', 'token_budget', 'context_filter', 'country', 'version'],
   },
   'get-node': { tool: 'bcatlas_get_node', positional: ['label'], optional: ['country', 'version'] },
+  'resolve-node': {
+    tool: 'bcatlas_resolve_node',
+    positional: ['object_type', 'object_name'],
+    optional: ['member', 'limit', 'country', 'version'],
+  },
   'get-neighbors': {
     tool: 'bcatlas_get_neighbors',
     positional: ['label'],
@@ -178,6 +183,7 @@ Commands:
   search <query> [--limit N] [--offset N] [--include-tests true] [--country C] [--version SHA]
   query-graph <question> [--mode bfs|dfs] [--depth N] [--country C] [--version SHA]
   get-node <label> [--country C] [--version SHA]
+  resolve-node <object_type> <object_name> [--member M] [--limit N] [--country C] [--version SHA]
   get-neighbors <label> [--relation-filter R] [--country C] [--version SHA]
   get-signature <label> [--country C] [--version SHA]
   get-procedure-body <label> [--country C] [--version SHA]
