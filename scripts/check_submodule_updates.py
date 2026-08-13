@@ -29,6 +29,8 @@ class WatchedSubmodule:
     branch: str
 
 
+BASE_BRANCH = "master"
+
 # Fixed, explicit set -- deliberately NOT derived from .gitmodules wholesale.
 # tools/graphify-al and other tooling submodules are out of scope for this
 # feature (spec.md Assumptions: those are vendored forks with their own
@@ -143,12 +145,22 @@ def bump_submodule_pointer(
     branch_name: str,
     repo_root: Path = _REPO_ROOT,
 ) -> None:
-    """Create `branch_name` off the default branch and commit a gitlink
+    """Create `branch_name` off `origin/<BASE_BRANCH>` and commit a gitlink
     bump for `submodule.path` to `target_sha`, via `git update-index
     --cacheinfo` -- never checks out the submodule's own content
     (research.md "Bump the pointer via git update-index --cacheinfo").
+
+    Branches explicitly from `origin/<BASE_BRANCH>`, not just `-B` off
+    whatever's currently checked out: when main() processes multiple
+    submodules in one run, a plain `git checkout -B` would branch off the
+    PREVIOUS submodule's just-created bump branch (still checked out from
+    the prior loop iteration), silently bundling multiple submodules' gitlink
+    changes into one PR (FR-003 violation) -- caught live in this feature's
+    first real multi-submodule run (PRs bundling data/w1-28-src alongside
+    data/docs/data/docs-devitpro).
     """
-    _run(["git", "checkout", "-B", branch_name], cwd=repo_root)
+    _run(["git", "fetch", "origin", BASE_BRANCH], cwd=repo_root)
+    _run(["git", "checkout", "-B", branch_name, f"origin/{BASE_BRANCH}"], cwd=repo_root)
     _run(
         ["git", "update-index", "--cacheinfo", f"160000,{target_sha},{submodule.path}"],
         cwd=repo_root,
@@ -205,7 +217,7 @@ def open_bump_pr(
             "--head",
             branch_name,
             "--base",
-            "master",
+            BASE_BRANCH,
         ],
         cwd=repo_root,
     )
