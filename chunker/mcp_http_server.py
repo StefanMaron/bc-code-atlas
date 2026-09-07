@@ -103,6 +103,48 @@ _OVERFETCH_MULTIPLIER = 4
 _MAX_OVERFETCH_ROUNDS = 3
 _MAX_FETCH_LIMIT = 100
 
+# How often `refresh_index=True` (the search tool's default) actually runs
+# the daemon's full incremental corpus scan, instead of trusting the last
+# scan is still fresh enough. Measured live (2026-09-07) at ~33s of a ~42s
+# total request -- content-hashing every file across w1-28-src + docs +
+# docs-devitpro isn't free even when every file is unchanged. The hosted
+# default corpus has no other freshness mechanism (a deploy only restarts
+# the service, which reopens existing on-disk state rather than reindexing
+# -- Principle VIII; watch mode is opt-in and unset there), so this can't
+# just become `refresh_index=False` outright -- but bump PRs land on the
+# order of hours to days apart (specs/008-reindex-webhook), so a few
+# minutes of extra staleness costs nothing in practice while saving this
+# cost on every query but the first in that window.
+_INDEX_REFRESH_MIN_INTERVAL_S = 300.0
+
+_index_refresh_lock = threading.Lock()
+_last_index_refresh_at = 0.0
+
+
+def _claim_index_refresh() -> bool:
+    """True (and claims it) iff a refresh is due; False if one already ran
+    within `_INDEX_REFRESH_MIN_INTERVAL_S`. Claims before the caller's scan
+    actually runs so two concurrent requests can't both decide to refresh
+    at the same boundary.
+    """
+    global _last_index_refresh_at
+    with _index_refresh_lock:
+        now = time.monotonic()
+        if now - _last_index_refresh_at < _INDEX_REFRESH_MIN_INTERVAL_S:
+            return False
+        _last_index_refresh_at = now
+        return True
+
+
+def _mark_index_refreshed() -> None:
+    """Record that a refresh just ran outside `_claim_index_refresh` (the
+    watch loop's own scan), so a query landing right after doesn't pay for
+    a redundant one.
+    """
+    global _last_index_refresh_at
+    with _index_refresh_lock:
+        _last_index_refresh_at = time.monotonic()
+
 
 def _is_test_path(file_path: str) -> bool:
     return any(_TEST_PATH_SEGMENT.search(seg) for seg in file_path.split("/")[:-1])
@@ -672,8 +714,9 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
             default=True,
             description=(
                 "Whether to incrementally update the index before searching."
-                " Set to False for faster consecutive queries"
-                " when the codebase hasn't changed."
+                " Already throttled to at most once every few minutes, so"
+                " back-to-back calls don't repay this cost -- set to False"
+                " to skip it on this call regardless."
             ),
         ),
         languages: list[str] | None = Field(
@@ -760,7 +803,7 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
             if paths and target_root == project_root and _corpus_path_prefixes:
                 effective_paths = _expand_paths_for_corpus_prefixes(paths, _corpus_path_prefixes)
 
-            if refresh_index:
+            if refresh_index and _claim_index_refresh():
                 await loop.run_in_executor(
                     None,
                     lambda: _run_with_stall_recovery(
@@ -884,6 +927,7 @@ def _watch_reindex_once(project_root: str) -> None:
     from cocoindex_code import client as _client
 
     _run_with_stall_recovery(lambda: _client.index(project_root), project_root)
+    _mark_index_refreshed()
 
 
 async def _watch_loop(
