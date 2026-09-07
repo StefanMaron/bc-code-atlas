@@ -79,6 +79,10 @@ def test_resolve_exact_version_string(_mirror):
     # UPDATE 2026-08-19: changed again, from 136774729359fdb059e05db27847
     # e5411d8ae1b8 to 88c5353d392ec7d2d682a6fd2a73f74d9028289a. Same
     # expected-drift situation, caught by a real CI run on PR #54.
+    #
+    # UPDATE 2026-09-07: changed again, from 88c5353d392ec7d2d682a6fd2a73
+    # f74d9028289a to 42ac68bfb71ee011d59b10e51b0c998d9f140901. Same
+    # expected-drift situation, caught by a real CI run on PR #90.
     spec = "w1-28.1.49838.51992"
 
     result = resolver.resolve_version(_COUNTRY, spec, mirror_dir=_mirror)
@@ -87,7 +91,7 @@ def test_resolve_exact_version_string(_mirror):
     assert result.resolved is True
     assert result.country == _COUNTRY
     assert result.version_string == spec
-    assert result.commit_sha == "88c5353d392ec7d2d682a6fd2a73f74d9028289a"
+    assert result.commit_sha == "42ac68bfb71ee011d59b10e51b0c998d9f140901"
 
 
 def test_resolve_exact_commit_sha(_mirror):
@@ -111,9 +115,10 @@ def test_resolve_loose_major_minor_picks_single_highest_build(_mirror):
     # `git log --format='%s' | grep '^w1-28\\.1\\.' | sort` against the real
     # upstream mirror. UPDATE 2026-07-31, then again 2026-08-02, then again
     # 2026-08-03, then again 2026-08-05, then again 2026-08-12, then again
-    # 2026-08-13, then again 2026-08-19: new builds keep landing upstream --
-    # expected drift (module docstring), not a code bug.
-    assert result.version_string == "w1-28.1.49838.53731"
+    # 2026-08-13, then again 2026-08-19, then again 2026-09-07 (PR #90):
+    # new builds keep landing upstream -- expected drift (module
+    # docstring), not a code bug.
+    assert result.version_string == "w1-28.1.49838.54169"
     assert result.version_string.startswith("w1-28.1.")
 
 
@@ -185,9 +190,9 @@ def test_list_major_versions_summarizes_by_major_minor(_mirror):
     entry = next(v for v in versions if v["major_minor"] == "28.1")
     # UPDATE 2026-07-31, then again 2026-08-02, then again 2026-08-03, then
     # again 2026-08-05, then again 2026-08-12, then again 2026-08-13, then
-    # again 2026-08-19: expected drift, see
+    # again 2026-08-19, then again 2026-09-07 (PR #90): expected drift, see
     # test_resolve_loose_major_minor_picks_single_highest_build above.
-    assert entry["latest_build"] == "w1-28.1.49838.53731"
+    assert entry["latest_build"] == "w1-28.1.49838.54169"
 
 
 def test_list_major_versions_returns_none_for_unknown_country(_mirror):

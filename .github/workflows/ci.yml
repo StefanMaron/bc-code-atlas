@@ -163,3 +163,10 @@ jobs:
         run: |
           uv run --project tools/cocoindex-code --with-editable chunker \
             pytest chunker/tests/test_watch_mode.py -v
+
+      # Same job/venv again -- covers the refresh_index throttle that caps
+      # how often bcatlas_search's default incremental corpus scan re-runs.
+      - name: Run index-refresh throttle tests
+        run: |
+          uv run --project tools/cocoindex-code --with-editable chunker \
+            pytest chunker/tests/test_index_refresh_throttle.py -v
