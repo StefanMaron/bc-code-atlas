@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import mcp_http_server as server  # noqa: E402
 
 
-def _reset(monkeypatch, *, min_interval: float = 300.0, last_refresh: float = 0.0) -> None:
+def _reset(
+    monkeypatch, *, min_interval: float = 300.0, last_refresh: float = float("-inf")
+) -> None:
     monkeypatch.setattr(server, "_INDEX_REFRESH_MIN_INTERVAL_S", min_interval)
     monkeypatch.setattr(server, "_last_index_refresh_at", last_refresh)
 

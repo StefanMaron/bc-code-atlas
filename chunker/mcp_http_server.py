@@ -118,7 +118,13 @@ _MAX_FETCH_LIMIT = 100
 _INDEX_REFRESH_MIN_INTERVAL_S = 300.0
 
 _index_refresh_lock = threading.Lock()
-_last_index_refresh_at = 0.0
+_last_index_refresh_at = float("-inf")  # unset -- always due on process start,
+# regardless of the platform's monotonic-clock origin. `time.monotonic()` is
+# CLOCK_MONOTONIC (time since boot on Linux), not since the epoch, so a
+# fresh CI container or VM can report well under
+# `_INDEX_REFRESH_MIN_INTERVAL_S` for its own uptime -- `0.0` looked like a
+# recent refresh there and wrongly skipped the first one (caught live by
+# this file's own CI job on this PR, not reasoned about).
 
 
 def _claim_index_refresh() -> bool:
