@@ -201,6 +201,18 @@ _STALL_TIMEOUT_S = 300.0
 _STALL_POLL_INTERVAL_S = 5.0
 _MAX_STALL_RETRIES = 3
 
+# `bcatlas_search`'s `timeout_seconds`. Without a deadline a search waited
+# for the daemon forever: on the hosted VM, one search against a (country,
+# version) the daemon had never loaded triggered a first-time index that
+# ran for 7 days, and every other search queued behind it. The default
+# covers a warm search plus the throttled default-corpus refresh with room
+# to spare; the max stays well under the aggregator's own forward deadline.
+_DEFAULT_SEARCH_TIMEOUT_S = 90.0
+_MAX_SEARCH_TIMEOUT_S = 600.0
+# Share of `timeout_seconds` the pre-search index refresh may use before the
+# search goes ahead against the index as it stands.
+_REFRESH_BUDGET_SHARE = 0.5
+
 _T = TypeVar("_T")
 
 
@@ -438,7 +450,44 @@ def _kill_shared_daemon_hard() -> None:
 _DAEMON_CALL_LOCK = threading.Lock()
 
 
-def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
+class DaemonCallTimeout(RuntimeError):
+    """A daemon call didn't finish before the caller's deadline.
+
+    The daemon is not killed: whatever it was doing (typically a first-time
+    index of a project it hasn't loaded yet) keeps running in the
+    background and the call it was answering is simply abandoned.
+    """
+
+
+# Daemon calls abandoned at their caller's deadline whose background thread
+# is still blocked waiting for the daemon, keyed by "<call kind>:<project
+# root>" -- kinds are separate so an abandoned index refresh never blocks
+# searches on the same project. While one is alive, a new call with the
+# same key fails fast instead of piling another blocked connection (and
+# thread) onto the same stuck work -- the hosted VM once had every search
+# queue behind a single (country, version) project whose first-time index
+# ran for 7 days.
+_abandoned_calls: dict[str, threading.Thread] = {}
+_abandoned_calls_lock = threading.Lock()
+
+
+def _abandoned_call_alive(key: str) -> bool:
+    with _abandoned_calls_lock:
+        thread = _abandoned_calls.get(key)
+        if thread is None:
+            return False
+        if thread.is_alive():
+            return True
+        del _abandoned_calls[key]
+        return False
+
+
+def _run_with_stall_recovery(
+    fn: Callable[[], _T],
+    project_root: str,
+    deadline: float | None = None,
+    call_kind: str = "call",
+) -> _T:
     """Run a blocking `cocoindex_code.client` call (`index`/`search`) to
     completion, recovering from the documented daemon stall above instead
     of hanging forever.
@@ -454,8 +503,22 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
     cheap and lossless: verified live (this session) that `ccc index`
     picks back up from its on-disk LMDB/SQLite state within ~40s of a
     kill, re-embedding nothing already completed.
+
+    `deadline` (a `time.monotonic()` value; None = no limit, which only the
+    watch loop uses) bounds the whole call, including the wait for
+    `_DAEMON_CALL_LOCK`. Past it, raises `DaemonCallTimeout` and leaves the
+    daemon running -- it may be legitimately busy, not stalled.
     """
-    with _DAEMON_CALL_LOCK:
+    abandon_key = f"{call_kind}:{project_root}"
+    if _abandoned_call_alive(abandon_key):
+        raise DaemonCallTimeout(
+            "an earlier call for this project timed out and the daemon is"
+            " still working on it"
+        )
+    lock_timeout = -1 if deadline is None else max(0.0, deadline - time.monotonic())
+    if not _DAEMON_CALL_LOCK.acquire(timeout=lock_timeout):
+        raise DaemonCallTimeout("timed out waiting for another daemon call to finish")
+    try:
         for attempt in range(1, _MAX_STALL_RETRIES + 1):
             outcome: dict[str, object] = {}
 
@@ -471,9 +534,16 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
             last_fp = _progress_signal(project_root)
             last_progress = time.monotonic()
             while thread.is_alive():
-                thread.join(timeout=_STALL_POLL_INTERVAL_S)
+                wait = _STALL_POLL_INTERVAL_S
+                if deadline is not None:
+                    wait = min(wait, max(0.0, deadline - time.monotonic()))
+                thread.join(timeout=wait)
                 if not thread.is_alive():
                     break
+                if deadline is not None and time.monotonic() >= deadline:
+                    with _abandoned_calls_lock:
+                        _abandoned_calls[abandon_key] = thread
+                    raise DaemonCallTimeout("the daemon did not answer before the deadline")
                 fp = _progress_signal(project_root)
                 now = time.monotonic()
                 if fp != last_fp:
@@ -501,6 +571,8 @@ def _run_with_stall_recovery(fn: Callable[[], _T], project_root: str) -> _T:
                     "~/.cocoindex_code/daemon.log."
                 )
         raise AssertionError("unreachable")  # pragma: no cover
+    finally:
+        _DAEMON_CALL_LOCK.release()
 
 
 # --- multi-tenant routing (T028, specs/001-multi-version-serving) ---------
@@ -769,9 +841,22 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 " with `country`. Omit both to search the default corpus."
             ),
         ),
+        timeout_seconds: float = Field(
+            default=_DEFAULT_SEARCH_TIMEOUT_S,
+            ge=1,
+            le=_MAX_SEARCH_TIMEOUT_S,
+            description=(
+                "Give up and return an error after this many seconds instead"
+                " of waiting indefinitely. A search can be slow when the"
+                " server is still loading a (country, version) it hasn't"
+                " served since it started -- if it times out, retry later."
+            ),
+        ),
     ) -> SearchResultModel:
         """Query the codebase index via the daemon, filtering out test paths by default."""
         loop = asyncio.get_event_loop()
+        deadline = time.monotonic() + timeout_seconds
+        target_root = project_root
         try:
             # Multi-tenant routing (T028): a caller that supplies neither
             # country nor version gets today's exact behavior unchanged --
@@ -785,7 +870,6 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
             # path (Principle II) -- refresh_index is therefore only ever
             # honored for this server's own default/originally-configured
             # corpus, never for a routed (country, version).
-            target_root = project_root
             if country is not None or version is not None:
                 if not country or not version:
                     return SearchResultModel(
@@ -810,12 +894,23 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 effective_paths = _expand_paths_for_corpus_prefixes(paths, _corpus_path_prefixes)
 
             if refresh_index and _claim_index_refresh():
-                await loop.run_in_executor(
-                    None,
-                    lambda: _run_with_stall_recovery(
-                        lambda: _client.index(target_root), target_root
-                    ),
-                )
+                # The refresh only keeps the default corpus fresh; it must
+                # never eat the whole budget. Past its share, the daemon
+                # keeps refreshing in the background and this search runs
+                # against the index as it stands.
+                refresh_deadline = time.monotonic() + timeout_seconds * _REFRESH_BUDGET_SHARE
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: _run_with_stall_recovery(
+                            lambda: _client.index(target_root),
+                            target_root,
+                            refresh_deadline,
+                            call_kind="index",
+                        ),
+                    )
+                except DaemonCallTimeout:
+                    pass
 
             if include_tests:
                 resp = await loop.run_in_executor(
@@ -830,6 +925,8 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                             offset=offset,
                         ),
                         target_root,
+                        deadline,
+                        call_kind="search",
                     ),
                 )
                 kept = resp.results
@@ -855,6 +952,8 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                                 offset=offset,
                             ),
                             target_root,
+                            deadline,
+                            call_kind="search",
                         ),
                     )
                     message = resp.message
@@ -885,6 +984,22 @@ def create_filtered_mcp_server(project_root: str) -> FastMCP:
                 total_returned=len(kept),
                 offset=offset,
                 message=message,
+            )
+        except DaemonCallTimeout as e:
+            scope = (
+                f"({country}, {version})"
+                if target_root != project_root
+                else "the default corpus"
+            )
+            return SearchResultModel(
+                success=False,
+                message=(
+                    f"Search timed out after {timeout_seconds:.0f}s ({e!s})."
+                    f" The search server is busy loading {scope} -- this"
+                    " happens the first time a (country, version) is searched"
+                    " after a server restart and can take a while. Retry"
+                    " later."
+                ),
             )
         except Exception as e:
             return SearchResultModel(success=False, message=f"Query failed: {e!s}")

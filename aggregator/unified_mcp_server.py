@@ -58,6 +58,19 @@ from pydantic import Field
 
 _log = logging.getLogger("bc_code_atlas.aggregator")
 
+# Hard ceiling on any single forwarded call. Before this, a backend that
+# never answered (live: the search daemon stuck on a 7-day first-time index,
+# the graph backend thrashing in swap) left the client hanging until the MCP
+# client's own stream read timed out, and then surfaced only as an opaque
+# "unhandled errors in a TaskGroup". Generous on purpose: some graph queries
+# legitimately take tens of seconds on the hosted VM.
+_DEFAULT_FORWARD_TIMEOUT_S = 180.0
+# `bcatlas_search` bounds itself with `timeout_seconds`; the aggregator adds
+# this margin on top for connection setup and response transfer.
+_SEARCH_FORWARD_MARGIN_S = 30.0
+_DEFAULT_SEARCH_TIMEOUT_S = 90.0
+_MAX_SEARCH_TIMEOUT_S = 600.0
+
 _AGGREGATOR_INSTRUCTIONS = (
     "A queryable window into Microsoft Dynamics 365 Business Central's AL"
     " source code and official documentation -- for dependency and"
@@ -126,14 +139,23 @@ _AGGREGATOR_INSTRUCTIONS = (
 
 
 @asynccontextmanager
-async def _backend_session(url: str):
-    async with streamablehttp_client(url) as (read, write, _get_session_id):
+async def _backend_session(url: str, timeout_s: float):
+    async with streamablehttp_client(url, sse_read_timeout=timeout_s + 10) as (
+        read,
+        write,
+        _get_session_id,
+    ):
         async with ClientSession(read, write) as session:
             await session.initialize()
             yield session
 
 
-async def _forward(url: str, tool: str, arguments: dict[str, Any]) -> Any:
+async def _forward(
+    url: str,
+    tool: str,
+    arguments: dict[str, Any],
+    timeout_s: float = _DEFAULT_FORWARD_TIMEOUT_S,
+) -> Any:
     """Call `tool` on the backend at `url` and return its result verbatim.
 
     Prefers structured content (e.g. the search tool's SearchResultModel) so
@@ -154,8 +176,15 @@ async def _forward(url: str, tool: str, arguments: dict[str, Any]) -> Any:
     started = time.monotonic()
     _log.info("[%s] -> %s %s args=%r", request_id, tool, url, arguments)
     try:
-        async with _backend_session(url) as session:
-            result = await session.call_tool(tool, arguments)
+        async with asyncio.timeout(timeout_s):
+            async with _backend_session(url, timeout_s) as session:
+                result = await session.call_tool(tool, arguments)
+    except TimeoutError:
+        _log.warning("[%s] <- %s %s timed out after %.0fs", request_id, tool, url, timeout_s)
+        raise RuntimeError(
+            f"{tool} did not answer within {timeout_s:.0f}s. The backend is"
+            " busy or unhealthy -- retry later."
+        ) from None
     except Exception:
         elapsed_ms = (time.monotonic() - started) * 1000
         _log.exception("[%s] <- %s %s raised after %.1fms", request_id, tool, url, elapsed_ms)
@@ -258,6 +287,17 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
                 " `country`."
             ),
         ),
+        timeout_seconds: float = Field(
+            default=_DEFAULT_SEARCH_TIMEOUT_S,
+            ge=1,
+            le=_MAX_SEARCH_TIMEOUT_S,
+            description=(
+                "Give up and return an error after this many seconds instead"
+                " of waiting indefinitely. The first search of a (country,"
+                " version) after a server restart can be slow -- if it times"
+                " out, retry later."
+            ),
+        ),
     ) -> Any:
         return await _forward(
             search_url,
@@ -272,7 +312,9 @@ def create_aggregator(search_url: str, graph_url: str, registry_url: str, build_
                 "include_tests": include_tests,
                 "country": country,
                 "version": version,
+                "timeout_seconds": timeout_seconds,
             },
+            timeout_s=timeout_seconds + _SEARCH_FORWARD_MARGIN_S,
         )
 
     @mcp.tool(
