@@ -170,3 +170,10 @@ jobs:
         run: |
           uv run --project tools/cocoindex-code --with-editable chunker \
             pytest chunker/tests/test_index_refresh_throttle.py -v
+
+      # Same job/venv again -- covers bcatlas_search's timeout_seconds
+      # deadline so a busy daemon can't hang every search indefinitely.
+      - name: Run daemon-call timeout tests
+        run: |
+          uv run --project tools/cocoindex-code --with-editable chunker \
+            pytest chunker/tests/test_daemon_call_timeout.py -v

@@ -90,7 +90,7 @@ const COMMANDS = {
   search: {
     tool: 'bcatlas_search',
     positional: ['query'],
-    optional: ['limit', 'offset', 'refresh_index', 'languages', 'paths', 'include_tests', 'country', 'version'],
+    optional: ['limit', 'offset', 'refresh_index', 'languages', 'paths', 'include_tests', 'country', 'version', 'timeout_seconds'],
   },
   'query-graph': {
     tool: 'bcatlas_query_graph',
@@ -180,7 +180,7 @@ function printHelp() {
 Usage: bc-code-atlas <command> [positional args...] [--flag value ...] [--json]
 
 Commands:
-  search <query> [--limit N] [--offset N] [--include-tests true] [--country C] [--version SHA]
+  search <query> [--limit N] [--offset N] [--include-tests true] [--country C] [--version SHA] [--timeout-seconds N]
   query-graph <question> [--mode bfs|dfs] [--depth N] [--country C] [--version SHA]
   get-node <label> [--country C] [--version SHA]
   resolve-node <object_type> <object_name> [--member M] [--limit N] [--country C] [--version SHA]

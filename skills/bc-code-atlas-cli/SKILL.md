@@ -32,7 +32,7 @@ covered, one subcommand each (dashes instead of underscores, `bcatlas_` prefix
 dropped):
 
 **Search & source**
-- `search <query> [--limit N] [--offset N] [--include-tests true] [--country C] [--version SHA]` — semantic search over AL source + docs
+- `search <query> [--limit N] [--offset N] [--include-tests true] [--country C] [--version SHA] [--timeout-seconds N]` — semantic search over AL source + docs (gives up after 90s by default)
 - `get-signature <label>` / `get-procedure-body <label>` / `get-object-source <label>` — exact source re-read from disk, not the index
 
 **Structural graph**
